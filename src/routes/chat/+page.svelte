@@ -381,15 +381,18 @@
     abortController = new AbortController();
 
     try {
-             // Build branch context for messages
-       const branchMessages = (() => {
-         // Normal linear conversation - send all messages plus the new user message
-         const allMessages = [...activeChat.messages, userMsg];
-         console.log('Normal conversation - all messages:', allMessages.map(m => ({ role: m.role, content: m.content.substring(0, 50) })));
-         return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
-       })();
-
-      console.log('Branch messages before validation:', branchMessages);
+      // Build branch context for messages - ONLY current branch
+      const branchMessages = (() => {
+        // Get current branch messages (includes full path from root to current branch)
+        const currentBranchMessages = selectedBranchId ? 
+          getBranchMessages(activeChat.messages, selectedBranchId) : 
+          activeChat.messages;
+        
+        // Add the new user message to the current branch context
+        const messagesWithNewUser = [...currentBranchMessages, userMsg];
+        
+        return messagesWithNewUser.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+      })();
 
       // Validate messages before sending
       const validBranchMessages = branchMessages.filter(msg => 
@@ -400,8 +403,6 @@
         typeof msg.content === 'string' && 
         msg.content.trim().length > 0
       );
-
-      console.log('Valid branch messages after filtering:', validBranchMessages);
 
       if (validBranchMessages.length === 0) {
         console.error('No valid messages to send. Branch messages:', branchMessages);
@@ -649,32 +650,8 @@
     editingMessage = msg;
     editInput = msg.content;
     
-    // Auto-select the branch containing this message
-    if (activeChat) {
-      // Find which branch this message belongs to
-      let messageBranchId = null;
-      
-      // If message has no parent, it's a root message
-      if (!msg.parentId) {
-        messageBranchId = msg.id;
-      } else {
-        // Find the root message of this branch
-        let current = msg;
-        while (current.parentId) {
-          const parent = activeChat.messages.find(m => m.id === current.parentId);
-          if (parent) {
-            current = parent;
-          } else {
-            break;
-          }
-        }
-        messageBranchId = current.id;
-      }
-      
-      if (messageBranchId) {
-        selectedBranchId = messageBranchId;
-      }
-    }
+    // DON'T change branch selection when starting edit
+    // Let the user see the current display without changes
   }
 
     async function confirmEdit() {
@@ -720,26 +697,64 @@
       // Clear branch check cache to ensure fresh results after edit
       branchCheckCache.clear();
       
-      // Immediately check for siblings and update available branches
-      const messagesWithSameParent = activeChat.messages.filter(m => m.parentId === originalMessage.parentId);
-      if (messagesWithSameParent.length > 1) {
-        // We now have siblings! Update available branches
-        const rootMessages = activeChat.messages.filter(msg => !msg.parentId);
-        availableBranches = rootMessages.map(root => ({
-          id: root.id,
-          preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
-          messageCount: getBranchMessageCount(activeChat.messages, root.id)
+      // Update available branches using the new branch detection logic
+      console.log('=== CALLING getAvailableBranches AFTER EDIT ===');
+      availableBranches = getAvailableBranches(activeChat.messages);
+      console.log('=== getAvailableBranches RESULT ===', availableBranches);
+      
+      // Find and select the correct branch that contains the edited message
+      console.log('availableBranches:', availableBranches);
+      console.log('editedMsg.id:', editedMsg.id);
+      
+      // CRITICAL FIX: Find branches at the level where the edited message exists
+      const editedMsgLevel = editedMsg.parentId || 'root';
+      console.log('Looking for branches at level (parentId):', editedMsgLevel);
+      
+      // Get siblings of the edited message
+      const editedMsgSiblings = activeChat.messages.filter(msg => 
+        (msg.parentId || 'root') === editedMsgLevel
+      );
+      
+      console.log('Siblings of edited message:', editedMsgSiblings.map(s => s.content));
+      
+      if (editedMsgSiblings.length > 1) {
+        // Use the edited message siblings as the available branches
+        availableBranches = editedMsgSiblings.map(sibling => ({
+          id: sibling.id,
+          preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+          messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
         }));
         
-        // Set the edited message as the selected branch
-        selectedBranchId = editedMsg.id;
-        
-
+        console.log('Updated availableBranches to edited message level:', availableBranches);
+        selectedBranchId = editedMsg.id; // Select the edited message directly
+      } else if (availableBranches.length > 0) {
+        // Fallback: use the deepest branches if no siblings at edited level
+        selectedBranchId = availableBranches[0].id;
+      } else {
+        selectedBranchId = null;
       }
+      
+      console.log('final selectedBranchId:', selectedBranchId);
       
       // Force a re-render to show the navigation buttons immediately
       activeChat = { ...activeChat };
       chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Force another re-render to ensure branch filtering is applied
+      setTimeout(() => {
+        if (activeChat) {
+          activeChat = { ...activeChat };
+          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        }
+      }, 0);
+      
+      // Additional re-render after a short delay to ensure proper filtering
+      setTimeout(() => {
+        if (activeChat) {
+          activeChat = { ...activeChat };
+          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        }
+      }, 50);
       
       // Scroll to bottom to show the edited message
       scrollToBottom();
@@ -747,16 +762,37 @@
       // Note: The edited message now replaces the original in the current branch
       // The AI response will be added below it, creating a new conversation flow
 
-      // Now get the AI response with streaming
+      // Now get the AI response with streaming using proper branch context
+      const branchContext = (() => {
+        // CRITICAL FIX: Build context from the path up to the edited message (not the selected branch)
+        // This ensures AI gets the correct context for the current conversation path
+        const pathToEditedMessage = [];
+        let currentMsg = editedMsg;
+        
+        // Build path from edited message back to root
+        while (currentMsg) {
+          pathToEditedMessage.unshift(currentMsg);
+          if (currentMsg.parentId) {
+            currentMsg = activeChat.messages.find(m => m.id === currentMsg.parentId);
+          } else {
+            break;
+          }
+        }
+        
+        console.log('=== AI CONTEXT DEBUG ===');
+        console.log('Path to edited message:', pathToEditedMessage.map(m => `${m.role}: ${m.content}`));
+        
+        const context = pathToEditedMessage.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        console.log('final context sent to AI:', context);
+        
+        return context;
+      })();
+      
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          messages: [{
-            role: 'user',
-            content: newContent,
-            chatId: activeChat.id
-          }]
+          messages: branchContext
         })
       });
 
@@ -869,27 +905,109 @@
     editInput = '';
   }
 
-  // Branch management functions - simplified
+  // Branch management functions - detect branches at any level where siblings exist
   function getAvailableBranches(messages: Message[]): { id: string; preview: string; messageCount: number }[] {
     if (!messages || messages.length === 0) return [];
     
-    // Find root messages (messages with no parent)
-    const rootMessages = messages.filter(msg => !msg.parentId);
+    console.log('getAvailableBranches called with', messages.length, 'messages');
     
-    if (rootMessages.length === 0) {
-      // If no root messages, treat the first message as root
-      return [{
-        id: messages[0].id,
-        preview: messages[0].content.length > 50 ? messages[0].content.substring(0, 50) + '...' : messages[0].content,
-        messageCount: messages.length
-      }];
+    // Find all groups of sibling messages (messages with the same parent)
+    const parentGroups = new Map<string | null, Message[]>();
+    
+    messages.forEach(msg => {
+      const parentKey = msg.parentId || 'root';
+      if (!parentGroups.has(parentKey)) {
+        parentGroups.set(parentKey, []);
+      }
+      parentGroups.get(parentKey)!.push(msg);
+    });
+    
+    console.log('parentGroups:', Array.from(parentGroups.entries()).map(([parent, children]) => ({
+      parent,
+      children: children.map(c => c.content)
+    })));
+    
+    // Find the deepest/most recent branching point (prioritize deeper branches)
+    let deepestBranches: Message[] = [];
+    let maxDepth = -1;
+    
+    for (const [parentId, siblings] of parentGroups) {
+      if (siblings.length > 1) {
+        console.log(`Found ${siblings.length} siblings with parent:`, parentId);
+        console.log('Siblings:', siblings.map(s => s.content));
+        
+        // Calculate the depth of this branching point
+        let depth = 0;
+        if (parentId && parentId !== 'root') {
+          // Find the parent message and calculate its depth
+          const parentMsg = messages.find(m => m.id === parentId);
+          if (parentMsg) {
+            depth = getMessageDepth(messages, parentMsg.id);
+          }
+        }
+        
+        console.log('Depth for this branching point:', depth);
+        
+        // Use this branch if it's deeper than previously found branches
+        if (depth > maxDepth) {
+          maxDepth = depth;
+          deepestBranches = siblings;
+          console.log('New deepest branches selected:', siblings.map(s => s.content));
+        }
+      }
     }
     
-    return rootMessages.map(root => ({
-      id: root.id,
-      preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
-      messageCount: getBranchMessageCount(messages, root.id)
-    }));
+    console.log('Final deepest branches:', deepestBranches.map(b => b.content));
+    
+    if (deepestBranches.length > 0) {
+      const result = deepestBranches.map(sibling => ({
+        id: sibling.id,
+        preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+        messageCount: getBranchMessageCount(messages, sibling.id)
+      }));
+      console.log('Returning branches:', result);
+      return result;
+    }
+    
+    // No branches found, return empty array
+    console.log('No branches found');
+    return [];
+  }
+  
+  // Helper function to calculate message depth in the tree
+  function getMessageDepth(messages: Message[], messageId: string): number {
+    const messageMap = new Map(messages.map(msg => [msg.id, msg]));
+    
+    function calculateDepth(id: string): number {
+      const msg = messageMap.get(id);
+      if (!msg || !msg.parentId) return 0;
+      return 1 + calculateDepth(msg.parentId);
+    }
+    
+    return calculateDepth(messageId);
+  }
+  
+  // NEW: Get all branch points in the message tree (for advanced navigation)
+  function getAllBranchPoints(messages: Message[]): Map<string | null, Message[]> {
+    const parentGroups = new Map<string | null, Message[]>();
+    
+    messages.forEach(msg => {
+      const parentKey = msg.parentId || 'root';
+      if (!parentGroups.has(parentKey)) {
+        parentGroups.set(parentKey, []);
+      }
+      parentGroups.get(parentKey)!.push(msg);
+    });
+    
+    // Return only groups that have multiple children (branch points)
+    const branchPoints = new Map<string | null, Message[]>();
+    for (const [parentId, children] of parentGroups) {
+      if (children.length > 1) {
+        branchPoints.set(parentId, children);
+      }
+    }
+    
+    return branchPoints;
   }
   
   function getBranchMessageCount(messages: Message[], rootId: string): number {
@@ -912,109 +1030,103 @@
   function getBranchMessages(messages: Message[], branchId: string): Message[] {
     if (!branchId || !messages || messages.length === 0) return messages;
     
-    // Find the root message for this branch
-    const rootMessage = messages.find(msg => msg.id === branchId);
-    if (!rootMessage) return messages;
+    const selectedMessage = messages.find(msg => msg.id === branchId);
+    if (!selectedMessage) return messages;
     
-    // Collect all messages in this branch (root + all descendants)
-    const branchMessages: Message[] = [];
     const messageMap = new Map(messages.map(msg => [msg.id, msg]));
     
-    function collectBranchMessages(messageId: string) {
+    // DEBUG: Add logging to see what's happening
+    console.log('getBranchMessages called with branchId:', branchId);
+    console.log('selectedMessage:', selectedMessage);
+    
+    // Collect ONLY the specific path from root to the selected message
+    function collectPathToMessage(messageId: string): Message[] {
       const message = messageMap.get(messageId);
-      if (message) {
-        branchMessages.push(message);
-        // Find all children of this message
-        messages.forEach(msg => {
-          if (msg.parentId === messageId) {
-            collectBranchMessages(msg.id);
-          }
-        });
-      }
+      if (!message) return [];
+      
+      // If this message has a parent, get the path to the parent first
+      const pathToParent = message.parentId ? collectPathToMessage(message.parentId) : [];
+      
+      // Add this message to the path
+      return [...pathToParent, message];
     }
     
-    collectBranchMessages(branchId);
+    // Get the path from root to the selected message
+    const pathToSelected = collectPathToMessage(branchId);
+    console.log('pathToSelected:', pathToSelected.map(m => m.content));
     
-    // Sort by timestamp to maintain chronological order
-    return branchMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    // Follow ONLY ONE linear path through descendants (not all branches)
+    function collectLinearPath(messageId: string, descendants: Message[] = []): Message[] {
+      // Find the children of this message
+      const children = messages.filter(msg => msg.parentId === messageId);
+      
+      if (children.length === 0) {
+        // No children, end of path
+        return descendants;
+      }
+      
+      // If multiple children (branching point), take the first/primary one
+      // This ensures we follow only ONE path, not all branches
+      const nextMessage = children[0]; // Take first child to follow single path
+      descendants.push(nextMessage);
+      
+      // Continue following this single path
+      return collectLinearPath(nextMessage.id, descendants);
+    }
+    
+    const linearDescendants = collectLinearPath(branchId);
+    console.log('linear descendants (single path):', linearDescendants.map(m => m.content));
+    
+    // Combine path and ONLY linear descendants
+    const branchMessages = [...pathToSelected, ...linearDescendants];
+    
+    // Remove duplicates and sort by timestamp
+    const uniqueMessages = Array.from(new Map(branchMessages.map(msg => [msg.id, msg])).values());
+    const sortedMessages = uniqueMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    
+    console.log('final branch messages (path + all descendants):', sortedMessages.map(m => m.content));
+    
+    return sortedMessages;
   }
 
+  // Helper function to get messages for current branch with safety checks
   function getCurrentBranchMessages(): Message[] {
     if (!activeChat) return [];
+    if (!selectedBranchId) return activeChat.messages;
     
-    // If no branch is selected, return all messages (default behavior)
-    if (!selectedBranchId) {
+    // Check if selectedBranchId is the root message (has no parent)
+    const selectedMessage = activeChat.messages.find(msg => msg.id === selectedBranchId);
+    if (selectedMessage && !selectedMessage.parentId) {
       return activeChat.messages;
     }
     
     return getBranchMessages(activeChat.messages, selectedBranchId);
   }
 
-  // Get all available branches for a specific message (including sub-branches)
+  // Get all available branches for a specific message (enhanced for multi-level trees)
   function getBranchesForMessage(messageId: string): { id: string; preview: string; messageCount: number }[] {
     if (!activeChat || isStreaming || isUpdatingUI || isGeneratingResponse) return [];
     
     const message = activeChat.messages.find(m => m.id === messageId);
     if (!message) return [];
     
-    const branches: { id: string; preview: string; messageCount: number }[] = [];
+    // Get all branch points in the tree
+    const branchPoints = getAllBranchPoints(activeChat.messages);
     
-    // If this message has a parent (including NULL), show sibling branches
-    if (message.parentId !== undefined) { // Include NULL parent case
-      const siblingMessages = activeChat.messages.filter(m => m.parentId === message.parentId);
-      
-      if (siblingMessages.length > 1) {
-        // Add all sibling messages as branches
-        siblingMessages.forEach(sibling => {
-          branches.push({
-            id: sibling.id,
-            preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
-            messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
-          });
-        });
-        
-        // Debug logging (only once per message to prevent spam)
-        const logCacheKey = `getBranches_log_${messageId}`;
-        if (!branchCheckCache.has(logCacheKey)) {
-          console.log(`getBranchesForMessage for "${message.content.substring(0, 30)}...":`, {
-            messageId,
-            parentId: message.parentId,
-            siblingMessages: siblingMessages.length,
-            branches: branches.length,
-            siblingIds: siblingMessages.map(m => m.id.substring(0, 8)),
-            siblingContents: siblingMessages.map(m => m.content.substring(0, 30)),
-            totalMessages: activeChat.messages.length
-          });
-          
-          // Cache this log to prevent duplicate logging
-          branchCheckCache.set(logCacheKey, { result: true, timestamp: Date.now() });
-        }
-        
-        return branches;
-      }
+    // Check if this message has siblings (same parent)
+    const parentKey = message.parentId || 'root';
+    const siblingMessages = branchPoints.get(parentKey) || [];
+    
+    if (siblingMessages.length > 1) {
+      // Return all sibling messages as branches
+      return siblingMessages.map(sibling => ({
+        id: sibling.id,
+        preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+        messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
+      }));
     }
     
-    // If this message has multiple children, show child branches
-    const childMessages = activeChat.messages.filter(m => m.parentId === messageId);
-    if (childMessages.length > 1) {
-      // Add the current message as a branch root
-      branches.push({
-        id: message.id,
-        preview: message.content.length > 50 ? message.content.substring(0, 50) + '...' : message.content,
-        messageCount: getBranchMessageCount(activeChat.messages, message.id)
-      });
-      
-      // Add all child messages as branches
-      childMessages.forEach(child => {
-        branches.push({
-          id: child.id,
-          preview: child.content.length > 50 ? child.content.substring(0, 50) + '...' : child.content,
-          messageCount: getBranchMessageCount(activeChat.messages, child.id)
-        });
-      });
-    }
-    
-    return branches;
+    return [];
   }
 
   // Flag to prevent branch checking during streaming
@@ -1034,44 +1146,25 @@
   const branchCheckCache = new Map<string, { result: boolean; timestamp: number }>();
   const CACHE_DURATION = 500; // 500ms cache duration
   
-  // Check if a message has multiple branches
+  // Check if a message has multiple branches (enhanced for multi-level trees)
   function hasMultipleBranches(messageId: string): boolean {
     if (!activeChat || isStreaming || isUpdatingUI || isGeneratingResponse) return false;
-    
-    // Debounce: only check once per 100ms
-    const now = Date.now();
-    if (now - lastBranchCheck < BRANCH_CHECK_DEBOUNCE) {
-      return false;
-    }
-    lastBranchCheck = now;
-    
-    // Check cache first
-    const cached = branchCheckCache.get(messageId);
-    if (cached && (now - cached.timestamp) < CACHE_DURATION) {
-      return cached.result;
-    }
     
     const message = activeChat.messages.find(m => m.id === messageId);
     if (!message) return false;
     
-    // Find all messages that have this message as a parent (direct children)
-    const childMessages = activeChat.messages.filter(m => m.parentId === messageId);
+    // Get all branch points in the tree
+    const branchPoints = getAllBranchPoints(activeChat.messages);
     
-    // Check if this message has siblings (same parent, including NULL parent for root messages)
+    // Check if this message has siblings (same parent)
     let siblingMessages: Message[] = [];
     if (message.parentId !== undefined) { // Include NULL parent case
-      siblingMessages = activeChat.messages.filter(m => m.parentId === message.parentId);
+      const parentKey = message.parentId || 'root';
+      siblingMessages = branchPoints.get(parentKey) || [];
     }
     
-
-    
-    // Show branches if there are multiple children OR multiple siblings
-    // IMPORTANT: siblingMessages.length > 1 means there are at least 2 messages with the same parent
-    // This includes the current message + at least 1 other message = 2 total
-    const result = childMessages.length > 1 || siblingMessages.length > 1;
-    
-    // Cache the result
-    branchCheckCache.set(messageId, { result, timestamp: now });
+    // Show branches if there are multiple siblings
+    const result = siblingMessages.length > 1;
     
     return result;
   }
@@ -1252,7 +1345,7 @@
          {:else}
                        
            
-                       {#each (selectedBranchId ? getCurrentBranchMessages() : activeChat.messages) as message, i (`${activeChat.id}-${message.id}`)}
+                       {#each (selectedBranchId ? getBranchMessages(activeChat.messages, selectedBranchId) : activeChat.messages) as message, i (`${activeChat.id}-${message.id}`)}
             <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div class="max-w-3xl group">
                 <div class="flex items-start gap-2">
@@ -1317,7 +1410,7 @@
                        {/if}
                      {/if}
 
-                                           <!-- Branch Navigation Arrows - Only for user messages and only on hover -->
+                      <!-- Branch Navigation Arrows - Only for user messages and only on hover -->
                       {#if !editingMessageId && message.role === 'user' && hasMultipleBranches(message.id)}
                         <div class="mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                           <div class="flex items-center justify-center gap-2">
@@ -1383,28 +1476,7 @@
       </div>
     {/if}
 
-    <!-- Debug Panel (only show in development) -->
-    {#if browser && import.meta.env.DEV}
-      <div class="border-t border-gray-200 p-2 bg-gray-50 text-xs">
-        <details>
-          <summary class="cursor-pointer font-medium">Debug: Message Structure</summary>
-          <div class="mt-2 space-y-1">
-            <div>Total Messages: {activeChat?.messages?.length || 0}</div>
-            <div>Selected Branch: {selectedBranchId || 'None'}</div>
-            <div>Available Branches: {availableBranches.length}</div>
-            {#if activeChat?.messages}
-              <div class="max-h-32 overflow-y-auto">
-                {#each activeChat.messages as msg}
-                  <div class="text-gray-600">
-                    {msg.role}: {msg.content.substring(0, 30)}... (ID: {msg.id.substring(0, 8)}, Parent: {msg.parentId?.substring(0, 8) || 'null'})
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        </details>
-      </div>
-    {/if}
+
 
     <!-- Input Area -->
     <div class="border-t border-gray-200 p-4">
