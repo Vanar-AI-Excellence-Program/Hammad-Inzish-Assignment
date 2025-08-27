@@ -18,12 +18,13 @@
   let error: string | null = null;
   let abortController: AbortController | null = null;
 
-  let replyToMessageId: string | null = null;
   let renamingChatId: string | null = null;
   let renameInput = '';
-  let fileInput: HTMLInputElement;
-  let uploadedFile: File | null = null;
-  $: replyToMessage = activeChat?.messages.find((m) => m.id === replyToMessageId) || null;
+  let editingMessageId: string | null = null;
+  let editInput = '';
+  let editingMessage: Message | null = null;
+  let selectedBranchId: string | null = null; // Current branch being displayed
+  let availableBranches: { id: string; preview: string; messageCount: number }[] = []; // Available branches
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -38,12 +39,7 @@
     };
   }
 
-  function escapeHtml(s: string): string {
-    return s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-  }
+
 
   function renderMarkdownLite(src: string): string {
     let text = src || '';
@@ -53,15 +49,25 @@
     text = text.replace(/^## (.*$)/gim, '<h2 class="text-xl font-semibold mt-4 mb-2">$1</h2>');
     text = text.replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold mt-4 mb-2">$1</h1>');
     
-    // Code fences ```lang\ncode\n``` with syntax highlighting
-    text = text.replace(/```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-      const cls = lang ? ` class="language-${lang}"` : '';
-      const langLabel = lang ? `<div class="text-xs text-gray-300 mb-2 font-mono bg-gray-700 px-2 py-1 rounded">${lang}</div>` : '';
-      return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${langLabel}${escapeHtml(code.trim())}</code></pre></div>`;
-    });
-    
-    // Inline code `code`
-    text = text.replace(/`([^`]+)`/g, (_m, code) => `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapeHtml(code)}</code>`);
+         // Code fences ```lang\ncode\n``` with syntax highlighting
+     text = text.replace(/```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+       const cls = lang ? ` class="language-${lang}"` : '';
+       const langLabel = lang ? `<div class="text-xs text-gray-300 mb-2 font-mono bg-gray-700 px-2 py-1 rounded">${lang}</div>` : '';
+       const escapedCode = code.trim()
+         .replace(/&/g, '&amp;')
+         .replace(/</g, '&lt;')
+         .replace(/>/g, '&gt;');
+       return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${langLabel}${escapedCode}</code></pre></div>`;
+     });
+     
+     // Inline code `code`
+     text = text.replace(/`([^`]+)`/g, (_m, code) => {
+       const escapedCode = code
+         .replace(/&/g, '&amp;')
+         .replace(/</g, '&lt;')
+         .replace(/>/g, '&gt;');
+       return `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapedCode}</code>`;
+     });
     
     // Bold **text** and __text__
     text = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
@@ -143,6 +149,14 @@
       
       // Set the first chat as active
       activeChat = chats[0];
+      
+             // Initialize branches for the first chat
+       if (activeChat && activeChat.messages.length > 0) {
+         availableBranches = getAvailableBranches(activeChat.messages);
+         if (availableBranches.length > 0) {
+           selectedBranchId = availableBranches[0].id; // Default to first branch
+         }
+       }
     } else {
       createNewChat();
     }
@@ -157,6 +171,9 @@
     };
     chats = [newChat, ...chats];
     activeChat = newChat;
+    
+    // Clear branch check cache for new chat
+    branchCheckCache.clear();
     
     // Save to DB
     try {
@@ -205,6 +222,23 @@
       }
       
       activeChat = chat;
+      
+      // Initialize branches for the selected chat
+      if (activeChat.messages.length > 0) {
+        availableBranches = getAvailableBranches(activeChat.messages);
+        if (availableBranches.length > 0) {
+          selectedBranchId = availableBranches[0].id; // Default to first branch
+        } else {
+          selectedBranchId = null;
+        }
+      } else {
+        availableBranches = [];
+        selectedBranchId = null;
+      }
+      
+      // Clear branch check cache when switching chats
+      branchCheckCache.clear();
+      
       // ensure we scroll to bottom of the newly selected chat
       scrollToBottom();
     }, 0);
@@ -267,8 +301,22 @@
                   const updatedActiveChat = chats.find(c => c.id === activeChat.id);
                   if (updatedActiveChat) {
                     activeChat = updatedActiveChat;
+                                         // Refresh branches for the updated chat
+                     if (activeChat.messages.length > 0) {
+                       availableBranches = getAvailableBranches(activeChat.messages);
+                       if (availableBranches.length > 0) {
+                         selectedBranchId = availableBranches[0].id; // Default to first branch
+                       }
+                     }
                   } else if (chats.length > 0) {
                     activeChat = chats[0];
+                                         // Initialize branches for the new active chat
+                     if (activeChat.messages.length > 0) {
+                       availableBranches = getAvailableBranches(activeChat.messages);
+                       if (availableBranches.length > 0) {
+                         selectedBranchId = availableBranches[0].id; // Default to first branch
+                       }
+                     }
                   }
                 }
               }
@@ -284,39 +332,7 @@
   }
 
 
-  function getParentMessageContent(msg: Message): string | null {
-    if (!msg.parentId || !activeChat) return null;
-    const parent = activeChat.messages.find((m) => m.id === msg.parentId);
-    return parent ? parent.content : null;
-  }
 
-  function getParentPreview(msg: Message, maxLen = 160): string | null {
-    const c = getParentMessageContent(msg);
-    if (!c) return null;
-    // Strip markdown formatting for cleaner previews
-    const cleanText = c
-      .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
-      .replace(/__(.*?)__/g, '$1') // Remove bold
-      .replace(/\*(.*?)\*/g, '$1') // Remove italic
-      .replace(/_(.*?)_/g, '$1') // Remove italic
-      .replace(/`([^`]+)`/g, '$1') // Remove inline code
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links, keep text
-      .replace(/^#+\s+/gm, '') // Remove headers
-      .replace(/^[-*+]\s+/gm, '') // Remove list markers
-      .replace(/^\d+\.\s+/gm, '') // Remove ordered list markers
-      .replace(/^>\s+/gm, '') // Remove blockquote markers
-      .replace(/\n/g, ' ') // Replace newlines with spaces
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .trim();
-    
-    return cleanText.length > maxLen ? cleanText.slice(0, maxLen) + '…' : cleanText;
-  }
-
-  function isForkedMessage(chat: Chat | null, index: number, msg: Message): boolean {
-    if (!chat || !msg.parentId) return false;
-    const prev = chat.messages[index - 1];
-    return !prev || msg.parentId !== prev.id;
-  }
 
   async function sendMessage() {
     const text = input.trim();
@@ -342,8 +358,21 @@
       activeChat.title = text.length > 50 ? text.substring(0, 50) + '...' : text;
     }
 
-    // compute parent for tree fork
-    const parentId = replyToMessageId ?? (activeChat.messages.length > 0 ? activeChat.messages[activeChat.messages.length - 1].id : null);
+         // compute parent for tree fork
+     let parentId = activeChat.messages.length > 0 ? activeChat.messages[activeChat.messages.length - 1].id : null;
+     
+     // If we're in a specific branch, ensure new messages continue from that branch
+     if (selectedBranchId) {
+       // Find the last message in the current branch
+       const currentBranchMessages = getCurrentBranchMessages();
+       if (currentBranchMessages.length > 0) {
+         const lastMessageInBranch = currentBranchMessages[currentBranchMessages.length - 1];
+         if (lastMessageInBranch && lastMessageInBranch.id !== parentId) {
+           // Update parent to continue from the current branch
+           parentId = lastMessageInBranch.id;
+         }
+       }
+     }
 
     loading = true;
     scrollToBottom();
@@ -352,41 +381,18 @@
     abortController = new AbortController();
 
     try {
-      // Build branch context for forked messages
+      // Build branch context for messages - ONLY current branch
       const branchMessages = (() => {
-        if (replyToMessageId) {
-          // If we're replying to a specific message, build context from that message
-          const byId = new Map(activeChat.messages.map((m) => [m.id, m] as const));
-          const chain: Message[] = [];
-          const visited = new Set<string>();
-          
-          // Start from the message we're replying to
-          let cur: Message | undefined = byId.get(replyToMessageId);
-          while (cur && !visited.has(cur.id)) {
-            chain.push(cur);
-            visited.add(cur.id);
-            if (cur.parentId) {
-              cur = byId.get(cur.parentId);
-            } else {
-              break;
-            }
-          }
-          
-          // Reverse to get chronological order and add the new user message
-          chain.reverse();
-          chain.push(userMsg);
-          
-          console.log('Fork context:', { replyToMessageId, chain: chain.map(m => ({ role: m.role, content: m.content.substring(0, 50) })) });
-          return chain.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
-        } else {
-          // Normal linear conversation - send all messages plus the new user message
-          const allMessages = [...activeChat.messages, userMsg];
-          console.log('Normal conversation - all messages:', allMessages.map(m => ({ role: m.role, content: m.content.substring(0, 50) })));
-          return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
-        }
+        // Get current branch messages (includes full path from root to current branch)
+        const currentBranchMessages = selectedBranchId ? 
+          getBranchMessages(activeChat.messages, selectedBranchId) : 
+          activeChat.messages;
+        
+        // Add the new user message to the current branch context
+        const messagesWithNewUser = [...currentBranchMessages, userMsg];
+        
+        return messagesWithNewUser.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
       })();
-
-      console.log('Branch messages before validation:', branchMessages);
 
       // Validate messages before sending
       const validBranchMessages = branchMessages.filter(msg => 
@@ -397,8 +403,6 @@
         typeof msg.content === 'string' && 
         msg.content.trim().length > 0
       );
-
-      console.log('Valid branch messages after filtering:', validBranchMessages);
 
       if (validBranchMessages.length === 0) {
         console.error('No valid messages to send. Branch messages:', branchMessages);
@@ -419,8 +423,7 @@
       activeChat.messages = [...activeChat.messages, userMessageWithParent];
       chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
       
-      // Clear reply banner after adding message
-      replyToMessageId = null;
+      
 
              const res = await fetch('/api/chat', {
          method: 'POST',
@@ -434,6 +437,11 @@
         throw new Error(data.error || 'Failed to get response');
       }
 
+      // Set all flags to prevent branch checking during response generation
+      isStreaming = true;
+      isUpdatingUI = true;
+      isGeneratingResponse = true;
+      
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
       let assistantText = '';
@@ -503,6 +511,39 @@
             content: assistantText
           })
         });
+        
+        // Clear branch check cache to ensure fresh results after new message
+        branchCheckCache.clear();
+        
+        // Check for branches using the updated local state
+        if (activeChat) {
+          // Set UI update flag to prevent branch checking during re-render
+          isUpdatingUI = true;
+          
+          // Check for siblings using the updated local state
+          const rootMessages = activeChat.messages.filter(msg => !msg.parentId);
+          const hasSiblings = rootMessages.length > 1;
+          
+          if (hasSiblings) {
+            // Create branches from local state
+            availableBranches = rootMessages.map(root => ({
+              id: root.id,
+              preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
+              messageCount: getBranchMessageCount(activeChat.messages, root.id)
+            }));
+          } else {
+            availableBranches = [];
+          }
+          
+          // Force a re-render to show navigation buttons
+          activeChat = { ...activeChat };
+          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+          
+          // Clear UI update flag after re-render is complete
+          setTimeout(() => {
+            isUpdatingUI = false;
+          }, 50);
+        }
       } catch (e) {
         console.error('Failed to save messages:', e);
       }
@@ -519,6 +560,9 @@
     } finally {
       loading = false;
       abortController = null;
+      isStreaming = false; // Reset streaming flag
+      isUpdatingUI = false; // Reset UI update flag
+      isGeneratingResponse = false; // Reset response generation flag
     }
   }
 
@@ -553,11 +597,20 @@
       e.preventDefault();
       sendMessage();
     }
+    
+    // Branch navigation keyboard shortcuts
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        selectPreviousBranch();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        selectNextBranch();
+      }
+    }
   }
 
-  function setReplyTarget(id: string) {
-    replyToMessageId = id === replyToMessageId ? null : id;
-  }
+
 
   function formatTime(date: Date) {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -591,6 +644,597 @@
       console.error('Failed to rename chat:', e);
     }
   }
+
+  function startEditMessage(msg: Message) {
+    editingMessageId = msg.id;
+    editingMessage = msg;
+    editInput = msg.content;
+    
+    // DON'T change branch selection when starting edit
+    // Let the user see the current display without changes
+  }
+
+    async function confirmEdit() {
+    if (!editingMessage || !activeChat || !editInput.trim()) return;
+    
+    const newContent = editInput.trim();
+    if (newContent === editingMessage.content) {
+      editingMessageId = null;
+      editingMessage = null;
+      editInput = '';
+      return;
+    }
+
+    // Don't switch branches when editing - stay on current branch
+    // The edited message will replace the original and show the new response
+    
+    // Store the message ID before clearing edit state
+    const messageIdToEdit = editingMessage.id;
+    
+    // Clear edit state immediately
+    editingMessageId = null;
+    editingMessage = null;
+    editInput = '';
+
+    try {
+      // Find the original message being edited
+      const originalMessage = activeChat.messages.find(m => m.id === messageIdToEdit);
+      if (!originalMessage) return;
+      
+      // Create the edited message as a SIBLING (same parent as original)
+      const editedMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: newContent,
+        timestamp: new Date(),
+        parentId: originalMessage.parentId // Same parent - this makes them siblings!
+      };
+
+      // Add the edited message to the chat (keeping original message)
+      activeChat.messages = [...activeChat.messages, editedMsg];
+      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Clear branch check cache to ensure fresh results after edit
+      branchCheckCache.clear();
+      
+      // Update available branches using the new branch detection logic
+      console.log('=== CALLING getAvailableBranches AFTER EDIT ===');
+      availableBranches = getAvailableBranches(activeChat.messages);
+      console.log('=== getAvailableBranches RESULT ===', availableBranches);
+      
+      // Find and select the correct branch that contains the edited message
+      console.log('availableBranches:', availableBranches);
+      console.log('editedMsg.id:', editedMsg.id);
+      
+      // CRITICAL FIX: Find branches at the level where the edited message exists
+      const editedMsgLevel = editedMsg.parentId || 'root';
+      console.log('Looking for branches at level (parentId):', editedMsgLevel);
+      
+      // Get siblings of the edited message
+      const editedMsgSiblings = activeChat.messages.filter(msg => 
+        (msg.parentId || 'root') === editedMsgLevel
+      );
+      
+      console.log('Siblings of edited message:', editedMsgSiblings.map(s => s.content));
+      
+      if (editedMsgSiblings.length > 1) {
+        // Use the edited message siblings as the available branches
+        availableBranches = editedMsgSiblings.map(sibling => ({
+          id: sibling.id,
+          preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+          messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
+        }));
+        
+        console.log('Updated availableBranches to edited message level:', availableBranches);
+        selectedBranchId = editedMsg.id; // Select the edited message directly
+      } else if (availableBranches.length > 0) {
+        // Fallback: use the deepest branches if no siblings at edited level
+        selectedBranchId = availableBranches[0].id;
+      } else {
+        selectedBranchId = null;
+      }
+      
+      console.log('final selectedBranchId:', selectedBranchId);
+      
+      // Force a re-render to show the navigation buttons immediately
+      activeChat = { ...activeChat };
+      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Force another re-render to ensure branch filtering is applied
+      setTimeout(() => {
+        if (activeChat) {
+          activeChat = { ...activeChat };
+          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        }
+      }, 0);
+      
+      // Additional re-render after a short delay to ensure proper filtering
+      setTimeout(() => {
+        if (activeChat) {
+          activeChat = { ...activeChat };
+          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        }
+      }, 50);
+      
+      // Scroll to bottom to show the edited message
+      scrollToBottom();
+      
+      // Note: The edited message now replaces the original in the current branch
+      // The AI response will be added below it, creating a new conversation flow
+
+      // Now get the AI response with streaming using proper branch context
+      const branchContext = (() => {
+        // CRITICAL FIX: Build context from the path up to the edited message (not the selected branch)
+        // This ensures AI gets the correct context for the current conversation path
+        const pathToEditedMessage = [];
+        let currentMsg = editedMsg;
+        
+        // Build path from edited message back to root
+        while (currentMsg) {
+          pathToEditedMessage.unshift(currentMsg);
+          if (currentMsg.parentId) {
+            currentMsg = activeChat.messages.find(m => m.id === currentMsg.parentId);
+          } else {
+            break;
+          }
+        }
+        
+        console.log('=== AI CONTEXT DEBUG ===');
+        console.log('Path to edited message:', pathToEditedMessage.map(m => `${m.role}: ${m.content}`));
+        
+        const context = pathToEditedMessage.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        console.log('final context sent to AI:', context);
+        
+        return context;
+      })();
+      
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: branchContext
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to get AI response');
+      }
+
+      // Add placeholder message for streaming
+      const assistantId = crypto.randomUUID();
+      const assistantMsg: Message = {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        parentId: editedMsg.id
+      };
+
+      activeChat.messages = [...activeChat.messages, assistantMsg];
+      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+
+      // Set all flags to prevent branch checking during response generation
+      isStreaming = true;
+      isUpdatingUI = true;
+      isGeneratingResponse = true;
+      
+      // Stream the response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let assistantText = '';
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            const m = line.match(/^0:(.*)$/);
+            if (m) {
+              try {
+                const decoded = JSON.parse(m[1]);
+                assistantText += decoded;
+                activeChat.messages = activeChat.messages.map((msg) =>
+                  msg.id === assistantId ? { ...msg, content: assistantText } : msg
+                );
+                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                scrollToBottom();
+              } catch (_) {
+                // ignore malformed lines
+              }
+            }
+          }
+        }
+      }
+
+      // Save messages to DB
+      try {
+        // Save the edited message as a new sibling
+        await fetch('/api/chat/message', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: editedMsg.id,
+            chatId: activeChat.id,
+            parentId: editedMsg.parentId, // Same parent as original = sibling
+            role: editedMsg.role,
+            content: editedMsg.content
+          })
+        });
+
+        // Save the AI response as child of the edited message
+        await fetch('/api/chat/message', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: assistantId,
+            chatId: activeChat.id,
+            parentId: editedMsg.id, // Child of edited message
+            role: 'assistant',
+            content: assistantText
+          })
+        });
+        
+        // Response generation complete, reset all flags
+        isStreaming = false;
+        isGeneratingResponse = false;
+        isUpdatingUI = false;
+        
+        // The messages are already in the local state, just need to force a re-render
+        // to ensure the navigation buttons appear
+        activeChat = { ...activeChat };
+        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        
+
+        
+      } catch (e) {
+        console.error('Failed to save messages:', e);
+      }
+
+    } catch (e) {
+      console.error('Error editing message:', e);
+    }
+  }
+
+  function cancelEdit() {
+    editingMessageId = null;
+    editingMessage = null;
+    editInput = '';
+  }
+
+  // Branch management functions - detect branches at any level where siblings exist
+  function getAvailableBranches(messages: Message[]): { id: string; preview: string; messageCount: number }[] {
+    if (!messages || messages.length === 0) return [];
+    
+    console.log('getAvailableBranches called with', messages.length, 'messages');
+    
+    // Find all groups of sibling messages (messages with the same parent)
+    const parentGroups = new Map<string | null, Message[]>();
+    
+    messages.forEach(msg => {
+      const parentKey = msg.parentId || 'root';
+      if (!parentGroups.has(parentKey)) {
+        parentGroups.set(parentKey, []);
+      }
+      parentGroups.get(parentKey)!.push(msg);
+    });
+    
+    console.log('parentGroups:', Array.from(parentGroups.entries()).map(([parent, children]) => ({
+      parent,
+      children: children.map(c => c.content)
+    })));
+    
+    // Find the deepest/most recent branching point (prioritize deeper branches)
+    let deepestBranches: Message[] = [];
+    let maxDepth = -1;
+    
+    for (const [parentId, siblings] of parentGroups) {
+      if (siblings.length > 1) {
+        console.log(`Found ${siblings.length} siblings with parent:`, parentId);
+        console.log('Siblings:', siblings.map(s => s.content));
+        
+        // Calculate the depth of this branching point
+        let depth = 0;
+        if (parentId && parentId !== 'root') {
+          // Find the parent message and calculate its depth
+          const parentMsg = messages.find(m => m.id === parentId);
+          if (parentMsg) {
+            depth = getMessageDepth(messages, parentMsg.id);
+          }
+        }
+        
+        console.log('Depth for this branching point:', depth);
+        
+        // Use this branch if it's deeper than previously found branches
+        if (depth > maxDepth) {
+          maxDepth = depth;
+          deepestBranches = siblings;
+          console.log('New deepest branches selected:', siblings.map(s => s.content));
+        }
+      }
+    }
+    
+    console.log('Final deepest branches:', deepestBranches.map(b => b.content));
+    
+    if (deepestBranches.length > 0) {
+      const result = deepestBranches.map(sibling => ({
+        id: sibling.id,
+        preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+        messageCount: getBranchMessageCount(messages, sibling.id)
+      }));
+      console.log('Returning branches:', result);
+      return result;
+    }
+    
+    // No branches found, return empty array
+    console.log('No branches found');
+    return [];
+  }
+  
+  // Helper function to calculate message depth in the tree
+  function getMessageDepth(messages: Message[], messageId: string): number {
+    const messageMap = new Map(messages.map(msg => [msg.id, msg]));
+    
+    function calculateDepth(id: string): number {
+      const msg = messageMap.get(id);
+      if (!msg || !msg.parentId) return 0;
+      return 1 + calculateDepth(msg.parentId);
+    }
+    
+    return calculateDepth(messageId);
+  }
+  
+  // NEW: Get all branch points in the message tree (for advanced navigation)
+  function getAllBranchPoints(messages: Message[]): Map<string | null, Message[]> {
+    const parentGroups = new Map<string | null, Message[]>();
+    
+    messages.forEach(msg => {
+      const parentKey = msg.parentId || 'root';
+      if (!parentGroups.has(parentKey)) {
+        parentGroups.set(parentKey, []);
+      }
+      parentGroups.get(parentKey)!.push(msg);
+    });
+    
+    // Return only groups that have multiple children (branch points)
+    const branchPoints = new Map<string | null, Message[]>();
+    for (const [parentId, children] of parentGroups) {
+      if (children.length > 1) {
+        branchPoints.set(parentId, children);
+      }
+    }
+    
+    return branchPoints;
+  }
+  
+  function getBranchMessageCount(messages: Message[], rootId: string): number {
+    const branchMessages = getBranchMessages(messages, rootId);
+    return branchMessages.length;
+  }
+
+  function selectBranch(branchId: string) {
+    selectedBranchId = branchId;
+    
+    // Force a re-render to show the selected branch messages
+    if (activeChat) {
+      // This will trigger the reactive statement to update the displayed messages
+      activeChat = { ...activeChat };
+    }
+  }
+  
+
+
+  function getBranchMessages(messages: Message[], branchId: string): Message[] {
+    if (!branchId || !messages || messages.length === 0) return messages;
+    
+    const selectedMessage = messages.find(msg => msg.id === branchId);
+    if (!selectedMessage) return messages;
+    
+    const messageMap = new Map(messages.map(msg => [msg.id, msg]));
+    
+    // DEBUG: Add logging to see what's happening
+    console.log('getBranchMessages called with branchId:', branchId);
+    console.log('selectedMessage:', selectedMessage);
+    
+    // Collect ONLY the specific path from root to the selected message
+    function collectPathToMessage(messageId: string): Message[] {
+      const message = messageMap.get(messageId);
+      if (!message) return [];
+      
+      // If this message has a parent, get the path to the parent first
+      const pathToParent = message.parentId ? collectPathToMessage(message.parentId) : [];
+      
+      // Add this message to the path
+      return [...pathToParent, message];
+    }
+    
+    // Get the path from root to the selected message
+    const pathToSelected = collectPathToMessage(branchId);
+    console.log('pathToSelected:', pathToSelected.map(m => m.content));
+    
+    // Follow ONLY ONE linear path through descendants (not all branches)
+    function collectLinearPath(messageId: string, descendants: Message[] = []): Message[] {
+      // Find the children of this message
+      const children = messages.filter(msg => msg.parentId === messageId);
+      
+      if (children.length === 0) {
+        // No children, end of path
+        return descendants;
+      }
+      
+      // If multiple children (branching point), take the first/primary one
+      // This ensures we follow only ONE path, not all branches
+      const nextMessage = children[0]; // Take first child to follow single path
+      descendants.push(nextMessage);
+      
+      // Continue following this single path
+      return collectLinearPath(nextMessage.id, descendants);
+    }
+    
+    const linearDescendants = collectLinearPath(branchId);
+    console.log('linear descendants (single path):', linearDescendants.map(m => m.content));
+    
+    // Combine path and ONLY linear descendants
+    const branchMessages = [...pathToSelected, ...linearDescendants];
+    
+    // Remove duplicates and sort by timestamp
+    const uniqueMessages = Array.from(new Map(branchMessages.map(msg => [msg.id, msg])).values());
+    const sortedMessages = uniqueMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    
+    console.log('final branch messages (path + all descendants):', sortedMessages.map(m => m.content));
+    
+    return sortedMessages;
+  }
+
+  // Helper function to get messages for current branch with safety checks
+  function getCurrentBranchMessages(): Message[] {
+    if (!activeChat) return [];
+    if (!selectedBranchId) return activeChat.messages;
+    
+    // Check if selectedBranchId is the root message (has no parent)
+    const selectedMessage = activeChat.messages.find(msg => msg.id === selectedBranchId);
+    if (selectedMessage && !selectedMessage.parentId) {
+      return activeChat.messages;
+    }
+    
+    return getBranchMessages(activeChat.messages, selectedBranchId);
+  }
+
+  // Get all available branches for a specific message (enhanced for multi-level trees)
+  function getBranchesForMessage(messageId: string): { id: string; preview: string; messageCount: number }[] {
+    if (!activeChat || isStreaming || isUpdatingUI || isGeneratingResponse) return [];
+    
+    const message = activeChat.messages.find(m => m.id === messageId);
+    if (!message) return [];
+    
+    // Get all branch points in the tree
+    const branchPoints = getAllBranchPoints(activeChat.messages);
+    
+    // Check if this message has siblings (same parent)
+    const parentKey = message.parentId || 'root';
+    const siblingMessages = branchPoints.get(parentKey) || [];
+    
+    if (siblingMessages.length > 1) {
+      // Return all sibling messages as branches
+      return siblingMessages.map(sibling => ({
+        id: sibling.id,
+        preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+        messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
+      }));
+    }
+    
+    return [];
+  }
+
+  // Flag to prevent branch checking during streaming
+  let isStreaming = false;
+  
+  // Flag to prevent branch checking during UI updates
+  let isUpdatingUI = false;
+  
+  // Flag to completely disable branch checking during response generation
+  let isGeneratingResponse = false;
+  
+  // Debounce mechanism to prevent excessive branch checking
+  let lastBranchCheck = 0;
+  const BRANCH_CHECK_DEBOUNCE = 100; // 100ms debounce
+  
+  // Cache for branch check results to prevent redundant calculations
+  const branchCheckCache = new Map<string, { result: boolean; timestamp: number }>();
+  const CACHE_DURATION = 500; // 500ms cache duration
+  
+  // Check if a message has multiple branches (enhanced for multi-level trees)
+  function hasMultipleBranches(messageId: string): boolean {
+    if (!activeChat || isStreaming || isUpdatingUI || isGeneratingResponse) return false;
+    
+    const message = activeChat.messages.find(m => m.id === messageId);
+    if (!message) return false;
+    
+    // Get all branch points in the tree
+    const branchPoints = getAllBranchPoints(activeChat.messages);
+    
+    // Check if this message has siblings (same parent)
+    let siblingMessages: Message[] = [];
+    if (message.parentId !== undefined) { // Include NULL parent case
+      const parentKey = message.parentId || 'root';
+      siblingMessages = branchPoints.get(parentKey) || [];
+    }
+    
+    // Show branches if there are multiple siblings
+    const result = siblingMessages.length > 1;
+    
+    return result;
+  }
+  
+  // Get current branch index for a specific message
+  function getCurrentBranchIndexForMessage(messageId: string): number {
+    if (!activeChat) return 0;
+    const branches = getBranchesForMessage(messageId);
+    if (branches.length === 0) return 0;
+    
+    // Find which branch is currently selected for this message
+    const currentBranch = branches.find(branch => branch.id === selectedBranchId);
+    if (currentBranch) {
+      return branches.findIndex(branch => branch.id === selectedBranchId);
+    }
+    
+    // If no branch is selected for this message, default to first
+    return 0;
+  }
+  
+  // Navigate to previous branch for a specific message
+  function selectPreviousBranchForMessage(messageId: string) {
+    const branches = getBranchesForMessage(messageId);
+    const currentIndex = getCurrentBranchIndexForMessage(messageId);
+    if (currentIndex > 0) {
+      const previousBranch = branches[currentIndex - 1];
+      selectBranch(previousBranch.id);
+    }
+  }
+  
+  // Navigate to next branch for a specific message
+  function selectNextBranchForMessage(messageId: string) {
+    const branches = getBranchesForMessage(messageId);
+    const currentIndex = getCurrentBranchIndexForMessage(messageId);
+    if (currentIndex < branches.length - 1) {
+      const nextBranch = branches[currentIndex + 1];
+      selectBranch(nextBranch.id);
+    }
+  }
+
+  // Force refresh branch detection for a specific message
+  function refreshBranchDetection(messageId: string) {
+    if (!activeChat) return;
+    
+    // Clear cache for this specific message
+    branchCheckCache.delete(messageId);
+    
+    // Force re-evaluation of branches
+    const message = activeChat.messages.find(m => m.id === messageId);
+    if (message) {
+      // Check for siblings
+      const siblingMessages = activeChat.messages.filter(m => m.parentId === message.parentId);
+      
+      if (siblingMessages.length > 1) {
+        // Update available branches
+        const rootMessages = activeChat.messages.filter(msg => !msg.parentId);
+        availableBranches = rootMessages.map(root => ({
+          id: root.id,
+          preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
+          messageCount: getBranchMessageCount(activeChat.messages, root.id)
+        }));
+        
+        // Force re-render
+        activeChat = { ...activeChat };
+        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      }
+    }
+  }
+
+
 </script>
 
 <div class="flex bg-white h-full">
@@ -677,42 +1321,43 @@
   <div class="flex-1 flex flex-col min-h-0">
          <!-- Header -->
      <header class="border-b border-gray-200 p-4 flex items-center justify-between">
-       <div class="flex items-center gap-3">
-         <h1 class="text-lg font-semibold text-gray-900">
-           {activeChat?.title || 'AI Assistant'}
-         </h1>
-       </div>
+               <div class="flex items-center gap-3">
+          <h1 class="text-lg font-semibold text-gray-900">
+            {activeChat?.title || 'AI Assistant'}
+          </h1>
+        </div>
        <div class="text-sm text-gray-500">
          Hello, {data.user.name || 'User'}
        </div>
      </header>
 
-    <!-- Messages -->
-    <div bind:this={messagesContainer} class="flex-1 overflow-y-auto p-4 space-y-4">
-      {#key activeChat?.id}
-        {#if !activeChat || activeChat.messages.length === 0}
-          <div class="text-center text-gray-500 mt-20">
-            <div class="text-4xl mb-4">💬</div>
-            <h2 class="text-xl font-semibold mb-2">Start a conversation</h2>
-            <p>Ask me anything about your app, or any general question!</p>
-          </div>
-        {:else}
-          {#each activeChat.messages as message, i (`${activeChat.id}-${message.id}`)}
+    
+
+         <!-- Messages -->
+     <div bind:this={messagesContainer} class="flex-1 overflow-y-auto p-4 space-y-4">
+       {#key activeChat?.id}
+         {#if !activeChat || activeChat.messages.length === 0}
+           <div class="text-center text-gray-500 mt-20">
+             <div class="text-4xl mb-4">💬</div>
+             <h2 class="text-xl font-semibold mb-2">Start a conversation</h2>
+             <p>Ask me anything about your app, or any general question!</p>
+           </div>
+         {:else}
+                       
+           
+                       {#each (selectedBranchId ? getBranchMessages(activeChat.messages, selectedBranchId) : activeChat.messages) as message, i (`${activeChat.id}-${message.id}`)}
             <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div class="max-w-3xl">
+              <div class="max-w-3xl group">
                 <div class="flex items-start gap-2">
                   <button
                     class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                    title="Fork from this message"
-                    aria-label="Fork from this message"
-                    onclick={() => setReplyTarget(message.id)}
+                    title="Edit this message"
+                    aria-label="Edit this message"
+                    onclick={() => startEditMessage(message)}
                   >
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M6 3v6a3 3 0 0 0 3 3h6"/>
-                      <circle cx="6" cy="3" r="2"/>
-                      <circle cx="18" cy="12" r="2"/>
-                      <circle cx="6" cy="21" r="2"/>
-                      <path d="M9 15a3 3 0 0 0-3 3v3"/>
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                      <path d="m18.5 2.5 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
                   </button>
                   <div class={`rounded-2xl px-4 py-3 ${
@@ -720,16 +1365,87 @@
                       ? 'bg-indigo-600 text-white' 
                       : 'bg-gray-50 text-gray-900 border border-gray-200'
                   }`}>
-                    {#if isForkedMessage(activeChat, i, message)}
-                      <div class="mb-2 text-xs text-gray-500 italic">
-                        Forked from: {getParentPreview(message) || 'previous message'}
-                      </div>
-                    {/if}
-                    {#if message.role === 'assistant'}
-                      <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
-                    {:else}
-                      <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
-                    {/if}
+                    
+                     
+
+                    
+                                         {#if editingMessageId === message.id}
+                       <!-- Inline edit interface -->
+                       <div class="space-y-3">
+                         <textarea
+                           class="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                           rows="3"
+                           bind:value={editInput}
+                           placeholder="Edit your message..."
+                           onkeydown={(e) => {
+                             if (e.key === 'Enter' && !e.shiftKey) {
+                               e.preventDefault();
+                               confirmEdit();
+                             } else if (e.key === 'Escape') {
+                               cancelEdit();
+                             }
+                           }}
+                         ></textarea>
+                         <div class="flex gap-2">
+                           <button
+                             onclick={confirmEdit}
+                             class="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 transition-colors"
+                           >
+                             Save
+                           </button>
+                           <button
+                             onclick={cancelEdit}
+                             class="px-3 py-1 bg-gray-500 text-white text-xs rounded hover:bg-gray-600 transition-colors"
+                           >
+                             Cancel
+                           </button>
+                         </div>
+                       </div>
+                     {:else}
+                       <!-- Normal message display -->
+                       {#if message.role === 'assistant'}
+                         <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
+                       {:else}
+                         <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
+                       {/if}
+                     {/if}
+
+                      <!-- Branch Navigation Arrows - Only for user messages and only on hover -->
+                      {#if !editingMessageId && message.role === 'user' && hasMultipleBranches(message.id)}
+                        <div class="mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <div class="flex items-center justify-center gap-2">
+
+                            
+                            <!-- Previous Branch Button -->
+                            {#if getCurrentBranchIndexForMessage(message.id) > 0}
+                              <button
+                                class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors"
+                                onclick={() => selectPreviousBranchForMessage(message.id)}
+                                title="Previous version"
+                              >
+                                ←
+                              </button>
+                            {/if}
+                            
+                            <!-- Current Branch Display -->
+                            <span class="px-2 py-1 text-xs bg-gray-600 text-white rounded">
+                              {getCurrentBranchIndexForMessage(message.id) + 1} of {getBranchesForMessage(message.id).length}
+                            </span>
+                            
+                            <!-- Next Branch Button -->
+                            {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
+                              <button
+                                class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors"
+                                onclick={() => selectNextBranchForMessage(message.id)}
+                                title="Next version"
+                              >
+                                →
+                              </button>
+                            {/if}
+                          </div>
+                        </div>
+
+                      {/if}
                   </div>
                 </div>
                 <div class={`text-xs text-gray-500 mt-1 ${message.role === 'user' ? 'text-right' : 'text-left'}`}>
@@ -760,27 +1476,11 @@
       </div>
     {/if}
 
+
+
     <!-- Input Area -->
     <div class="border-t border-gray-200 p-4">
-      {#if replyToMessage}
-        <div class="mb-3 p-3 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 flex items-start justify-between gap-3">
-          <div class="flex items-start gap-2">
-            <svg class="w-4 h-4 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M6 3v6a3 3 0 0 0 3 3h6"/>
-              <circle cx="6" cy="3" r="2"/>
-              <circle cx="18" cy="12" r="2"/>
-              <circle cx="6" cy="21" r="2"/>
-              <path d="M9 15a3 3 0 0 0-3 3v3"/>
-            </svg>
-            <div class="text-sm max-w-[80ch] truncate">
-              Replying to: <span use:setHtml={{ html: renderMarkdownLite(replyToMessage.content) }}></span>
-            </div>
-          </div>
-          <button class="text-indigo-700 hover:text-indigo-900 cursor-pointer" aria-label="Cancel reply" title="Cancel reply" onclick={() => (replyToMessageId = null)}>
-            ✕
-          </button>
-        </div>
-      {/if}
+      
       
 
       <div class="flex items-end gap-3">
@@ -821,9 +1521,9 @@
          </div>
       </div>
       
-      <div class="mt-2 text-xs text-gray-500 text-center">
-        Press Enter to send, Shift+Enter for new line
-      </div>
+                           <div class="mt-2 text-xs text-gray-500 text-center">
+          Press Enter to send, Shift+Enter for new line
+        </div>
     </div>
   </div>
 </div>
