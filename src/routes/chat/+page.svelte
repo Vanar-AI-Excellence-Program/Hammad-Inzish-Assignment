@@ -25,6 +25,12 @@
   let editingMessage: Message | null = null;
   let selectedBranchId: string | null = null; // Current branch being displayed
   let availableBranches: { id: string; preview: string; messageCount: number }[] = []; // Available branches
+  let searchQuery = ''; // Search query for filtering chats
+  let filteredChats: Chat[] = []; // Filtered chats based on search
+  let searchTimeout: number | null = null; // For debounced search
+  let isSearching = false; // Search loading state
+  let highlightedMessageId: string | null = null; // Message to highlight after search navigation
+  let searchNavigationTimeout: number | null = null; // Timeout for clearing highlight
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -252,7 +258,7 @@
     }
   }
 
-  async function selectChat(chat: Chat) {
+  async function selectChat(chat: Chat, branchId?: string | null, messageId?: string | null) {
     activeChat = null;
     // force DOM reset before setting the new chat to ensure formatting action runs
     setTimeout(async () => {
@@ -285,10 +291,21 @@
       
       activeChat = chat;
       
+      // Clear search when a chat is selected
+      if (searchQuery.trim()) {
+        searchQuery = '';
+      }
+      
       // CRITICAL FIX: Initialize branches for the selected chat
       if (activeChat.messages.length > 0) {
         availableBranches = getAvailableBranches(activeChat.messages);
-        if (availableBranches.length > 0) {
+        console.log('selectChat: Available branches after initialization:', availableBranches.map(b => ({ id: b.id, preview: b.preview.substring(0, 30) })));
+        
+        // If a specific branch was requested (from search), select it
+        if (branchId && availableBranches.some(b => b.id === branchId)) {
+          selectedBranchId = branchId;
+          console.log('Search result: switching to specific branch:', branchId);
+        } else if (availableBranches.length > 0) {
           // CRITICAL FIX: Select the LAST branch by default (most recent)
           // This ensures UI shows latest content and branch index matches
           selectedBranchId = availableBranches[availableBranches.length - 1].id;
@@ -303,6 +320,24 @@
       
       // Clear branch check cache when switching chats
       branchCheckCache.clear();
+      
+      // Handle message highlighting for search navigation
+      if (messageId) {
+        highlightedMessageId = messageId;
+        // Clear any existing timeout
+        if (searchNavigationTimeout) {
+          clearTimeout(searchNavigationTimeout);
+        }
+        // Set timeout to clear highlight after 5 seconds
+        searchNavigationTimeout = setTimeout(() => {
+          highlightedMessageId = null;
+        }, 5000);
+        
+        // Scroll to the highlighted message after a short delay to ensure DOM is ready
+        setTimeout(() => {
+          scrollToMessage(messageId);
+        }, 100);
+      }
       
       // ensure we scroll to bottom of the newly selected chat
       scrollToBottom();
@@ -649,6 +684,38 @@
     }, 10);
   }
 
+  // Function to scroll to a specific message
+  function scrollToMessage(messageId: string) {
+    console.log('scrollToMessage: Attempting to scroll to message:', messageId);
+    
+    setTimeout(() => {
+      const messageElement = document.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement;
+      console.log('scrollToMessage: Found message element:', messageElement);
+      
+      if (messageElement && messagesContainer) {
+        console.log('scrollToMessage: Scrolling to message element');
+        // Scroll the message into view
+        messageElement.scrollIntoView({ 
+          behavior: 'smooth', 
+          block: 'center' 
+        });
+        
+        // Add a brief flash effect to highlight the message
+        messageElement.classList.add('message-highlight');
+        console.log('scrollToMessage: Added highlight class to message');
+        
+        setTimeout(() => {
+          messageElement.classList.remove('message-highlight');
+          console.log('scrollToMessage: Removed highlight class from message');
+        }, 2000);
+      } else {
+        console.error('scrollToMessage: Message element or container not found');
+        console.log('scrollToMessage: messageElement:', messageElement);
+        console.log('scrollToMessage: messagesContainer:', messagesContainer);
+      }
+    }, 50);
+  }
+
   function stopResponse() {
     if (abortController) {
       abortController.abort();
@@ -671,6 +738,13 @@
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+    
+    // Search shortcut (Ctrl+F or Cmd+F)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      e.preventDefault();
+      focusSearchInput();
+      return;
     }
     
     // Branch navigation keyboard shortcuts
@@ -1126,6 +1200,15 @@
     console.log('New branchId:', branchId);
     console.log('Available branches before switch:', availableBranches);
     
+    // Clear any existing message highlight when manually switching branches
+    if (highlightedMessageId) {
+      highlightedMessageId = null;
+      if (searchNavigationTimeout) {
+        clearTimeout(searchNavigationTimeout);
+        searchNavigationTimeout = null;
+      }
+    }
+    
     // CRITICAL FIX: Only change the selected branch, don't affect message indexing
     selectedBranchId = branchId;
     
@@ -1139,20 +1222,36 @@
       activeChat = { ...activeChat };
     }
   }
-  
 
+  // Function to clear message highlight
+  function clearMessageHighlight() {
+    if (highlightedMessageId) {
+      highlightedMessageId = null;
+      if (searchNavigationTimeout) {
+        clearTimeout(searchNavigationTimeout);
+        searchNavigationTimeout = null;
+      }
+    }
+  }
 
   function getBranchMessages(messages: Message[], branchId: string): Message[] {
-    if (!branchId || !messages || messages.length === 0) return messages;
+    if (!branchId || !messages || messages.length === 0) {
+      console.log('getBranchMessages: No branchId or messages, returning all messages');
+      return messages;
+    }
     
     const selectedMessage = messages.find(msg => msg.id === branchId);
-    if (!selectedMessage) return messages;
+    if (!selectedMessage) {
+      console.log('getBranchMessages: Selected message not found, returning all messages');
+      return messages;
+    }
     
     const messageMap = new Map(messages.map(msg => [msg.id, msg]));
     
     // DEBUG: Add logging to see what's happening
     console.log('getBranchMessages called with branchId:', branchId);
-    console.log('selectedMessage:', selectedMessage);
+    console.log('selectedMessage:', selectedMessage.content.substring(0, 50));
+    console.log('Total messages:', messages.length);
     
     // Collect ONLY the specific path from root to the selected message
     function collectPathToMessage(messageId: string): Message[] {
@@ -1168,7 +1267,7 @@
     
     // Get the path from root to the selected message
     const pathToSelected = collectPathToMessage(branchId);
-    console.log('pathToSelected:', pathToSelected.map(m => m.content));
+    console.log('pathToSelected:', pathToSelected.map(m => m.content.substring(0, 30)));
     
     // Follow ONLY ONE linear path through descendants (not all branches)
     function collectLinearPath(messageId: string, descendants: Message[] = []): Message[] {
@@ -1190,18 +1289,14 @@
     }
     
     const linearDescendants = collectLinearPath(branchId);
-    console.log('linear descendants (single path):', linearDescendants.map(m => m.content));
+    console.log('linearDescendants:', linearDescendants.map(m => m.content.substring(0, 30)));
     
-    // Combine path and ONLY linear descendants
-    const branchMessages = [...pathToSelected, ...linearDescendants];
+    // Combine the path to the selected message with its descendants
+    const result = [...pathToSelected, ...linearDescendants];
+    console.log('Final result count:', result.length);
+    console.log('Final result:', result.map(m => m.content.substring(0, 30)));
     
-    // Remove duplicates and sort by timestamp
-    const uniqueMessages = Array.from(new Map(branchMessages.map(msg => [msg.id, msg])).values());
-    const sortedMessages = uniqueMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-    
-    console.log('final branch messages (path + all descendants):', sortedMessages.map(m => m.content));
-    
-    return sortedMessages;
+    return result;
   }
 
   // Helper function to get messages for current branch with safety checks
@@ -1621,6 +1716,308 @@
     }
   }
 
+  // Search function to filter chats by title and message content
+  function searchChats() {
+    if (!searchQuery.trim()) {
+      filteredChats = chats;
+      return;
+    }
+    
+    const query = searchQuery.toLowerCase().trim();
+    filteredChats = chats.filter(chat => {
+      // Search in title
+      if (chat.title.toLowerCase().includes(query)) {
+        return true;
+      }
+      
+      // Search in message content - only return true if there are actual matches
+      const matchingMessages = chat.messages.filter(message => 
+        message.content.toLowerCase().includes(query)
+      );
+      
+      // Only include chat if it has matching messages
+      return matchingMessages.length > 0;
+    });
+    
+    console.log('Search results:', filteredChats.map(chat => ({
+      title: chat.title,
+      matchCount: getAllSearchResults(chat, query).length
+    })));
+  }
+
+
+
+
+
+  // Debounced search function
+  function debouncedSearch() {
+    if (searchTimeout) {
+      clearTimeout(searchTimeout);
+    }
+    
+    // Show loading state immediately
+    isSearching = true;
+    
+    searchTimeout = setTimeout(() => {
+      searchChats();
+      isSearching = false;
+    }, 300); // 300ms delay
+  }
+
+  // Watch for changes in searchQuery and chats to update filtered results
+  $: if (searchQuery !== undefined && chats) {
+    debouncedSearch();
+  }
+
+  // Function to highlight search terms in text
+  function highlightSearchTerm(text: string, query: string) {
+    if (!query.trim()) return text;
+    
+    const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    return text.replace(regex, '<mark class="bg-yellow-200 px-1 rounded">$1</mark>');
+  }
+
+  // Function to get search result preview for a chat
+  function getSearchPreview(chat: Chat, query: string) {
+    if (!query.trim()) return null;
+    
+    const queryLower = query.toLowerCase();
+    
+    // First check if title matches
+    if (chat.title.toLowerCase().includes(queryLower)) {
+      return { type: 'title', text: chat.title };
+    }
+    
+    // Then check messages for matches
+    for (const message of chat.messages) {
+      if (message.content.toLowerCase().includes(queryLower)) {
+        const preview = message.content.length > 100 
+          ? message.content.substring(0, 100) + '...'
+          : message.content;
+        
+        return { 
+          type: 'message', 
+          text: preview, 
+          role: message.role
+        };
+      }
+    }
+    
+    return null;
+  }
+
+  // Function to get all search results for a chat
+  function getAllSearchResults(chat: Chat, query: string) {
+    if (!query.trim()) return [];
+    
+    const queryLower = query.toLowerCase();
+    const results = [];
+    
+    // Check title matches
+    if (chat.title.toLowerCase().includes(queryLower)) {
+      results.push({
+        type: 'title',
+        text: chat.title,
+        messageId: null
+      });
+    }
+    
+    // Check all messages for exact matches only
+    for (const message of chat.messages) {
+      if (message.content.toLowerCase().includes(queryLower)) {
+        // Create a preview that shows the context around the match
+        const contentLower = message.content.toLowerCase();
+        const matchIndex = contentLower.indexOf(queryLower);
+        
+        let preview = message.content;
+        if (preview.length > 100) {
+          // Show context around the match
+          const start = Math.max(0, matchIndex - 30);
+          const end = Math.min(preview.length, matchIndex + queryLower.length + 30);
+          preview = (start > 0 ? '...' : '') + 
+                   preview.substring(start, end) + 
+                   (end < preview.length ? '...' : '');
+        }
+        
+        results.push({
+          type: 'message',
+          text: preview,
+          role: message.role,
+          messageId: message.id
+        });
+      }
+    }
+    
+    console.log(`getAllSearchResults for "${chat.title}":`, results.length, 'matches found');
+    return results;
+  }
+
+  // Function to handle search input focus
+  function focusSearchInput() {
+    const searchInput = document.querySelector('input[placeholder="Search chats..."]') as HTMLInputElement;
+    if (searchInput) {
+      searchInput.focus();
+      searchInput.select();
+    }
+  }
+
+  // Function to handle manual chat selection (without search parameters)
+  async function selectChatManually(chat: Chat) {
+    // Clear any existing message highlight when manually selecting a chat
+    clearMessageHighlight();
+    
+    // Call the main selectChat function without search parameters
+    await selectChat(chat);
+  }
+
+  // Function to navigate to a specific message and show its path
+  async function navigateToMessage(chat: Chat, messageId: string) {
+    // Clear search first
+    searchQuery = '';
+    
+    console.log('navigateToMessage: Starting navigation to message:', messageId);
+    console.log('navigateToMessage: Chat messages count:', chat.messages.length);
+    
+    // Verify the message exists in the chat
+    const targetMessage = chat.messages.find(m => m.id === messageId);
+    if (!targetMessage) {
+      console.error('navigateToMessage: Target message not found in chat:', messageId);
+      return;
+    }
+    console.log('navigateToMessage: Target message found:', targetMessage.content.substring(0, 50));
+    
+    // First select the chat
+    await selectChat(chat);
+    
+    // Wait a bit for the chat to load and branches to be initialized
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Find the path from root to this message
+    const messagePath = findMessagePath(chat.messages, messageId);
+    if (messagePath.length === 0) {
+      console.error('Could not find path to message:', messageId);
+      return;
+    }
+    
+    // Find which branch this message belongs to (root message of the path)
+    const rootMessageId = messagePath[0].id;
+    console.log('Message path:', messagePath.map(m => m.content.substring(0, 30)));
+    console.log('Root message ID:', rootMessageId);
+    console.log('Available branches:', availableBranches.map(b => b.id));
+    
+    // Set the selected branch to show this path
+    if (availableBranches.some(b => b.id === rootMessageId)) {
+      selectedBranchId = rootMessageId;
+      console.log('Navigating to message path, selected branch:', rootMessageId);
+      
+      // Force a re-render to update the displayed messages
+      if (activeChat) {
+        activeChat = { ...activeChat };
+      }
+      
+      // Wait a bit more for the branch change to take effect
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Verify the branch was set correctly
+      console.log('Branch selection verified - selectedBranchId:', selectedBranchId);
+      console.log('Available branches after selection:', availableBranches.map(b => ({ id: b.id, preview: b.preview.substring(0, 30) })));
+      
+    } else {
+      console.error('Branch not found in available branches:', rootMessageId);
+      console.log('Available branches:', availableBranches);
+      console.log('Root message that should match:', rootMessageId);
+      
+      // Try to find a branch that contains this message path
+      const matchingBranch = availableBranches.find(branch => {
+        const branchMessages = getBranchMessages(chat.messages, branch.id);
+        return branchMessages.some(msg => msg.id === messageId);
+      });
+      
+      if (matchingBranch) {
+        console.log('Found matching branch for message:', matchingBranch.id);
+        selectedBranchId = matchingBranch.id;
+        if (activeChat) {
+          activeChat = { ...activeChat };
+        }
+      }
+    }
+    
+    // Highlight the target message
+    highlightedMessageId = messageId;
+    
+    // Clear any existing timeout
+    if (searchNavigationTimeout) {
+      clearTimeout(searchNavigationTimeout);
+    }
+    
+    // Set timeout to clear highlight after 5 seconds
+    searchNavigationTimeout = setTimeout(() => {
+      highlightedMessageId = null;
+    }, 5000);
+    
+    // Scroll to the message after a longer delay to ensure DOM is ready
+    setTimeout(() => {
+      // Check what messages are currently displayed
+      const displayedMessages = selectedBranchId ? 
+        getBranchMessages(chat.messages, selectedBranchId) : 
+        chat.messages;
+      
+      console.log('Messages currently displayed:', displayedMessages.length);
+      console.log('Target message should be in displayed messages:', 
+        displayedMessages.some(m => m.id === messageId));
+      
+      // Check if the message element exists in the DOM
+      const messageElement = document.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement;
+      console.log('Message element found before scroll:', messageElement);
+      
+      scrollToMessage(messageId);
+    }, 200);
+  }
+
+  // Function to find the path from root to a specific message
+  function findMessagePath(messages: Message[], messageId: string): Message[] {
+    console.log('findMessagePath: Starting path search for message:', messageId);
+    console.log('findMessagePath: Total messages:', messages.length);
+    
+    const messageMap = new Map(messages.map(msg => [msg.id, msg]));
+    const path: Message[] = [];
+    
+    function buildPath(id: string): boolean {
+      const message = messageMap.get(id);
+      if (!message) {
+        console.log('findMessagePath: Message not found for ID:', id);
+        return false;
+      }
+      
+      console.log('findMessagePath: Processing message:', message.content.substring(0, 30), 'parentId:', message.parentId);
+      
+      // If this message has a parent, build path to parent first
+      if (message.parentId) {
+        if (buildPath(message.parentId)) {
+          path.push(message);
+          console.log('findMessagePath: Added message to path:', message.content.substring(0, 30));
+          return true;
+        }
+        return false;
+      } else {
+        // This is a root message, start the path
+        path.push(message);
+        console.log('findMessagePath: Added root message to path:', message.content.substring(0, 30));
+        return true;
+      }
+    }
+    
+    buildPath(messageId);
+    
+    // CRITICAL FIX: Reverse the path to get correct order (root -> target)
+    const correctPath = path.reverse();
+    
+    console.log('findMessagePath: Final path length:', correctPath.length);
+    console.log('findMessagePath: Final path:', correctPath.map(m => m.content.substring(0, 30)));
+    console.log('findMessagePath: Root message ID:', correctPath[0]?.id);
+    
+    return correctPath;
+  }
 
 </script>
 
@@ -1629,78 +2026,163 @@
   <!-- Chat Sidebar -->
   <div class="w-80 bg-gray-50 border-r border-gray-200 flex flex-col min-h-0">
     <div class="p-4 border-b border-gray-200">
-      <div class="flex gap-2">
-                 <button
-           onclick={createNewChat}
-           class="flex-1 bg-blue-600 text-white rounded-lg px-4 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-blue-700 active:scale-95 transition-all duration-200"
-         >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
-          </svg>
-          New Chat
-        </button>
-                                   <button
-            onclick={refreshChats}
-            class="bg-gray-500 text-white rounded-lg px-3 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-gray-600 active:scale-95 transition-all duration-200"
-            title="Refresh chats"
-            aria-label="Refresh chats"
+             <div class="flex gap-2">
+                  <button
+            onclick={createNewChat}
+            class="flex-1 bg-blue-600 text-white rounded-lg px-4 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-blue-700 active:scale-95 transition-all duration-200"
           >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-          </svg>
-        </button>
-      </div>
+           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+           </svg>
+           New Chat
+         </button>
+       </div>
+       
+       <!-- Search Input -->
+       <div class="mt-3 relative">
+         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+           <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Search chats (Ctrl+F)">
+             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+           </svg>
+         </div>
+         <input
+           type="text"
+           bind:value={searchQuery}
+           placeholder="Search chats... (Ctrl+F)"
+           class="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 search-input"
+           onkeydown={(e) => {
+             if (e.key === 'Escape') {
+               searchQuery = '';
+               e.currentTarget.blur();
+             }
+           }}
+         />
+         {#if searchQuery.trim()}
+           <button
+             onclick={() => searchQuery = ''}
+             class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 cursor-pointer"
+             title="Clear search"
+           >
+             <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+             </svg>
+           </button>
+         {:else if isSearching}
+           <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+           </div>
+         {/if}
+       </div>
+       
+                <!-- Search Results Info -->
+       {#if searchQuery.trim()}
+         <div class="mt-2 text-xs text-gray-500 text-center search-results-count">
+           {#if isSearching}
+             Searching...
+           {:else}
+             {filteredChats.length} {filteredChats.length === 1 ? 'chat' : 'chats'} found
+             {#if filteredChats.length > 0}
+               <span class="block mt-1">for "{searchQuery}"</span>
+               {@const titleMatches = filteredChats.filter(c => c.title.toLowerCase().includes(searchQuery.toLowerCase())).length}
+               {@const messageMatches = filteredChats.reduce((total, c) => total + getAllSearchResults(c, searchQuery).filter(r => r.type === 'message').length, 0)}
+               <span class="block mt-1 text-blue-600">
+                 {titleMatches} title matches, {messageMatches} message matches
+               </span>
+             {/if}
+           {/if}
+         </div>
+       {/if}
     </div>
     
     <div class="flex-1 overflow-y-auto p-2">
-      {#each chats as chat (chat.id)}
-        <div
-          class={`p-3 rounded-lg mb-2 cursor-pointer group relative w-full ${
-            activeChat?.id === chat.id ? 'bg-blue-100 text-blue-900' : 'hover:bg-gray-100'
-          }`}
-          onclick={() => selectChat(chat)}
-          role="button"
-          tabindex="0"
-          onkeydown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              selectChat(chat);
-            }
-          }}
-        >
-          {#if renamingChatId === chat.id}
-            <input
-              class="text-sm font-medium w-full bg-white border border-blue-300 rounded px-2 py-1"
-              bind:value={renameInput}
-              onkeydown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); confirmRename(chat); }
-                else if (e.key === 'Escape') { renamingChatId = null; }
-              }}
-              onblur={() => confirmRename(chat)}
-
-            />
-          {:else}
-            <div class="text-sm font-medium truncate">{chat.title}</div>
-          {/if}
-          <div class="text-xs text-gray-500 mt-1">{chat.createdAt.toLocaleDateString()}</div>
-          <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                         <button
-               onclick={(e) => { e.stopPropagation(); startRename(chat); }}
-               class="text-gray-500 hover:text-gray-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
-               aria-label="Rename chat"
-             >
-              ✎
-            </button>
-                         <button
-               onclick={(e) => { e.stopPropagation(); deleteChat(chat.id); }}
-               class="text-red-500 hover:text-red-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
-               aria-label="Delete chat"
-             >
-              ✕
-            </button>
-          </div>
+      {#if searchQuery.trim() && filteredChats.length === 0}
+        <div class="text-center text-gray-500 py-8">
+          <svg class="mx-auto h-12 w-12 text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+          </svg>
+          <p class="text-sm font-medium">No chats found</p>
+          <p class="text-xs">Try adjusting your search terms</p>
         </div>
-      {/each}
+      {:else}
+        {#each (searchQuery.trim() ? filteredChats : chats) as chat (chat.id)}
+          <div
+            class={`p-3 rounded-lg mb-2 cursor-pointer group relative w-full ${
+              activeChat?.id === chat.id ? 'bg-blue-100 text-blue-900' : 'hover:bg-gray-100'
+            }`}
+            onclick={() => selectChatManually(chat)}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                selectChatManually(chat);
+              }
+            }}
+          >
+            {#if renamingChatId === chat.id}
+              <input
+                class="text-sm font-medium w-full bg-white border border-blue-300 rounded px-2 py-1"
+                bind:value={renameInput}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); confirmRename(chat); }
+                  else if (e.key === 'Escape') { renamingChatId = null; }
+                }}
+                onblur={() => confirmRename(chat)}
+
+              />
+            {:else}
+              <div class="text-sm font-medium truncate" use:setHtml={{ html: searchQuery.trim() ? highlightSearchTerm(chat.title, searchQuery) : chat.title }}></div>
+            {/if}
+            <div class="text-xs text-gray-500 mt-1">{chat.createdAt.toLocaleDateString()}</div>
+            
+            <!-- Search Preview -->
+            {#if searchQuery.trim() && getSearchPreview(chat, searchQuery)}
+              {@const allResults = getAllSearchResults(chat, searchQuery)}
+              <div class="search-preview">
+                <div class="text-xs text-gray-500 mb-2">
+                  {allResults.length} {allResults.length === 1 ? 'match' : 'matches'} found
+                </div>
+                
+                <!-- Show all matching messages -->
+                <div class="space-y-2">
+                  {#each allResults as result, i}
+                    {#if result.type === 'message'}
+                      <div class="p-2 bg-blue-50 border border-blue-200 rounded cursor-pointer hover:bg-blue-100 transition-colors" 
+                           onclick={(e) => { 
+                             e.stopPropagation(); 
+                             navigateToMessage(chat, result.messageId); 
+                           }}>
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="text-xs text-blue-600 font-medium">
+                            {result.role === 'user' ? 'You:' : 'AI:'}
+                          </span>
+                        </div>
+                        <div class="text-gray-700 text-sm" use:setHtml={{ html: highlightSearchTerm(result.text, searchQuery) }}></div>
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                           <button
+                 onclick={(e) => { e.stopPropagation(); startRename(chat); }}
+                 class="text-gray-500 hover:text-gray-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
+                 aria-label="Rename chat"
+               >
+                ✎
+              </button>
+                           <button
+                 onclick={(e) => { e.stopPropagation(); deleteChat(chat.id); }}
+                 class="text-red-500 hover:text-red-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
+                 aria-label="Delete chat"
+               >
+                ✕
+              </button>
+            </div>
+          </div>
+        {/each}
+      {/if}
     </div>
   </div>
 
@@ -1733,8 +2215,19 @@
                        
            
                        {#each (selectedBranchId ? getBranchMessages(activeChat.messages, selectedBranchId) : activeChat.messages) as message, i (`${activeChat.id}-${message.id}`)}
-            <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`} data-message-id={message.id}>
               <div class="max-w-3xl group">
+                <!-- Search Navigation Indicator -->
+                {#if highlightedMessageId === message.id}
+                  <div class="mb-2 text-center">
+                    <span class="inline-flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-800 text-xs rounded-full cursor-pointer hover:bg-blue-200 transition-colors" onclick={clearMessageHighlight}>
+                      <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"></path>
+                      </svg>
+                      Found via search (click to dismiss)
+                    </span>
+                  </div>
+                {/if}
                 <div class="flex items-start gap-2">
                   {#if message.role === 'user'}
                                          <button
@@ -2095,4 +2588,61 @@
     .active\:scale-95:active {
       transform: scale(0.95);
     }
+
+    /* Search highlight styles */
+    mark {
+      background-color: rgb(254 240 138) !important;
+      color: rgb(120 53 15) !important;
+      padding: 0.125rem 0.25rem;
+      border-radius: 0.25rem;
+      font-weight: 500;
+    }
+
+    /* Search input focus styles */
+    .search-input:focus {
+      border-color: rgb(59 130 246);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    /* Search results count styling */
+    .search-results-count {
+      color: rgb(107 114 128);
+      font-size: 0.75rem;
+      text-align: center;
+      margin-top: 0.5rem;
+    }
+
+  /* Search preview styling */
+  .search-preview {
+    background-color: rgb(249 250 251);
+    border: 1px solid rgb(229 231 235);
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+
+
+  /* Message highlighting for search navigation */
+  .message-highlight {
+    animation: message-highlight-pulse 2s ease-in-out;
+    border: 2px solid rgb(59 130 246);
+    border-radius: 0.75rem;
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+  }
+
+  @keyframes message-highlight-pulse {
+    0% {
+      border-color: rgb(59 130 246);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+    }
+    50% {
+      border-color: rgb(147 197 253);
+      box-shadow: 0 0 30px rgba(59, 130, 246, 0.5);
+    }
+    100% {
+      border-color: rgb(59 130 246);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+    }
+  }
 </style>
