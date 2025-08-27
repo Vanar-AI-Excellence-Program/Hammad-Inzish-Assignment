@@ -150,13 +150,16 @@
       // Set the first chat as active
       activeChat = chats[0];
       
-             // Initialize branches for the first chat
-       if (activeChat && activeChat.messages.length > 0) {
-         availableBranches = getAvailableBranches(activeChat.messages);
-         if (availableBranches.length > 0) {
-           selectedBranchId = availableBranches[0].id; // Default to first branch
-         }
-       }
+      // CRITICAL FIX: Initialize branches for the first chat
+      if (activeChat && activeChat.messages.length > 0) {
+        availableBranches = getAvailableBranches(activeChat.messages);
+        if (availableBranches.length > 0) {
+          // CRITICAL FIX: Select the LAST branch by default (most recent)
+          // This ensures UI shows latest content and branch index matches
+          selectedBranchId = availableBranches[availableBranches.length - 1].id;
+          console.log('Default branch selected:', selectedBranchId);
+        }
+      }
     } else {
       createNewChat();
     }
@@ -223,11 +226,14 @@
       
       activeChat = chat;
       
-      // Initialize branches for the selected chat
+      // CRITICAL FIX: Initialize branches for the selected chat
       if (activeChat.messages.length > 0) {
         availableBranches = getAvailableBranches(activeChat.messages);
         if (availableBranches.length > 0) {
-          selectedBranchId = availableBranches[0].id; // Default to first branch
+          // CRITICAL FIX: Select the LAST branch by default (most recent)
+          // This ensures UI shows latest content and branch index matches
+          selectedBranchId = availableBranches[availableBranches.length - 1].id;
+          console.log('Chat switched, default branch selected:', selectedBranchId);
         } else {
           selectedBranchId = null;
         }
@@ -301,22 +307,32 @@
                   const updatedActiveChat = chats.find(c => c.id === activeChat.id);
                   if (updatedActiveChat) {
                     activeChat = updatedActiveChat;
-                                         // Refresh branches for the updated chat
-                     if (activeChat.messages.length > 0) {
-                       availableBranches = getAvailableBranches(activeChat.messages);
-                       if (availableBranches.length > 0) {
-                         selectedBranchId = availableBranches[0].id; // Default to first branch
-                       }
-                     }
+                    // CRITICAL FIX: Refresh branches for the updated chat
+                    if (activeChat.messages.length > 0) {
+                      availableBranches = getAvailableBranches(activeChat.messages);
+                      if (availableBranches.length > 0) {
+                        // CRITICAL FIX: Maintain current branch selection if possible
+                        if (selectedBranchId && availableBranches.some(b => b.id === selectedBranchId)) {
+                          // Keep current selection
+                          console.log('Maintaining current branch selection:', selectedBranchId);
+                        } else {
+                          // Select the LAST branch by default (most recent)
+                          selectedBranchId = availableBranches[availableBranches.length - 1].id;
+                          console.log('Refreshed, new default branch selected:', selectedBranchId);
+                        }
+                      }
+                    }
                   } else if (chats.length > 0) {
                     activeChat = chats[0];
-                                         // Initialize branches for the new active chat
-                     if (activeChat.messages.length > 0) {
-                       availableBranches = getAvailableBranches(activeChat.messages);
-                       if (availableBranches.length > 0) {
-                         selectedBranchId = availableBranches[0].id; // Default to first branch
-                       }
-                     }
+                    // CRITICAL FIX: Initialize branches for the new active chat
+                    if (activeChat.messages.length > 0) {
+                      availableBranches = getAvailableBranches(activeChat.messages);
+                      if (availableBranches.length > 0) {
+                        // CRITICAL FIX: Select the LAST branch by default (most recent)
+                        selectedBranchId = availableBranches[availableBranches.length - 1].id;
+                        console.log('Chat refreshed, new default branch selected:', selectedBranchId);
+                      }
+                    }
                   }
                 }
               }
@@ -740,7 +756,7 @@
       activeChat = { ...activeChat };
       chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
       
-      // Force another re-render to ensure branch filtering is applied
+      // Force another re-render to ensure proper filtering
       setTimeout(() => {
         if (activeChat) {
           activeChat = { ...activeChat };
@@ -909,7 +925,10 @@
   function getAvailableBranches(messages: Message[]): { id: string; preview: string; messageCount: number }[] {
     if (!messages || messages.length === 0) return [];
     
-    console.log('getAvailableBranches called with', messages.length, 'messages');
+    console.log('=== getAvailableBranches called ===');
+    console.log('Input messages length:', messages.length);
+    console.log('activeChat.messages length:', activeChat?.messages?.length || 0);
+    console.log('Using input messages for branch detection, but activeChat.messages for message counting');
     
     // Find all groups of sibling messages (messages with the same parent)
     const parentGroups = new Map<string | null, Message[]>();
@@ -927,9 +946,9 @@
       children: children.map(c => c.content)
     })));
     
-    // Find the deepest/most recent branching point (prioritize deeper branches)
-    let deepestBranches: Message[] = [];
-    let maxDepth = -1;
+    // CRITICAL FIX: Don't prioritize deepest branches - maintain all branch levels
+    // This prevents parent-level branches from being reset
+    const allBranches: { id: string; preview: string; messageCount: number; depth: number }[] = [];
     
     for (const [parentId, siblings] of parentGroups) {
       if (siblings.length > 1) {
@@ -948,30 +967,33 @@
         
         console.log('Depth for this branching point:', depth);
         
-        // Use this branch if it's deeper than previously found branches
-        if (depth > maxDepth) {
-          maxDepth = depth;
-          deepestBranches = siblings;
-          console.log('New deepest branches selected:', siblings.map(s => s.content));
-        }
+        // Add all branches at this level
+        siblings.forEach(sibling => {
+          allBranches.push({
+            id: sibling.id,
+            preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+            // CRITICAL FIX: Always use activeChat.messages for consistent message counting
+            messageCount: getBranchMessageCount(activeChat?.messages || [], sibling.id),
+            depth: depth
+          });
+        });
       }
     }
     
-    console.log('Final deepest branches:', deepestBranches.map(b => b.content));
+    // Sort by depth (shallowest first) to maintain hierarchy
+    allBranches.sort((a, b) => a.depth - b.depth);
     
-    if (deepestBranches.length > 0) {
-      const result = deepestBranches.map(sibling => ({
-        id: sibling.id,
-        preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
-        messageCount: getBranchMessageCount(messages, sibling.id)
-      }));
-      console.log('Returning branches:', result);
-      return result;
-    }
+    console.log('All branches found (sorted by depth):', allBranches);
     
-    // No branches found, return empty array
-    console.log('No branches found');
-    return [];
+    // Return branches without depth info
+    const result = allBranches.map(({ id, preview, messageCount }) => ({
+      id,
+      preview,
+      messageCount
+    }));
+    
+    console.log('Returning branches with message counts:', result);
+    return result;
   }
   
   // Helper function to calculate message depth in the tree
@@ -1011,16 +1033,50 @@
   }
   
   function getBranchMessageCount(messages: Message[], rootId: string): number {
-    const branchMessages = getBranchMessages(messages, rootId);
-    return branchMessages.length;
+    // CRITICAL FIX: Always use the original message tree from activeChat, not the filtered messages
+    // This ensures message counts remain consistent when switching between branches
+    if (!activeChat) return 0;
+    
+    console.log('=== getBranchMessageCount called ===');
+    console.log('Input messages length:', messages.length);
+    console.log('activeChat.messages length:', activeChat.messages.length);
+    console.log('rootId:', rootId);
+    
+    // Safety check: ensure we're using the correct message array
+    if (messages.length !== activeChat.messages.length) {
+      console.warn('WARNING: Input messages length differs from activeChat.messages length!');
+      console.warn('This could cause inconsistent message counting.');
+      console.warn('Input messages:', messages.map(m => ({ id: m.id, content: m.content.substring(0, 30) + '...' })));
+      console.warn('ActiveChat messages:', activeChat.messages.map(m => ({ id: m.id, content: m.content.substring(0, 30) + '...' })));
+    }
+    
+    console.log('Using activeChat.messages for consistent counting');
+    
+    const branchMessages = getBranchMessages(activeChat.messages, rootId);
+    const count = branchMessages.length;
+    
+    console.log('Branch message count result:', count);
+    console.log('Branch messages:', branchMessages.map(m => m.content.substring(0, 30) + '...'));
+    
+    return count;
   }
 
   function selectBranch(branchId: string) {
+    console.log('=== selectBranch called ===');
+    console.log('Previous selectedBranchId:', selectedBranchId);
+    console.log('New branchId:', branchId);
+    console.log('Available branches before switch:', availableBranches);
+    
+    // CRITICAL FIX: Only change the selected branch, don't affect message indexing
     selectedBranchId = branchId;
     
     // Force a re-render to show the selected branch messages
     if (activeChat) {
+      console.log('Active chat messages count:', activeChat.messages.length);
+      console.log('Available branches after switch:', availableBranches);
+      
       // This will trigger the reactive statement to update the displayed messages
+      // but won't affect the branch index calculations for individual messages
       activeChat = { ...activeChat };
     }
   }
@@ -1094,12 +1150,16 @@
     if (!activeChat) return [];
     if (!selectedBranchId) return activeChat.messages;
     
-    // Check if selectedBranchId is the root message (has no parent)
+    // CRITICAL FIX: Check if selectedBranchId is the root message (has no parent)
     const selectedMessage = activeChat.messages.find(msg => msg.id === selectedBranchId);
     if (selectedMessage && !selectedMessage.parentId) {
+      // Root message selected, return all messages
+      console.log('Root message selected, returning all messages');
       return activeChat.messages;
     }
     
+    // CRITICAL FIX: Get messages for the selected branch
+    console.log('Getting messages for selected branch:', selectedBranchId);
     return getBranchMessages(activeChat.messages, selectedBranchId);
   }
 
@@ -1118,8 +1178,16 @@
     const siblingMessages = branchPoints.get(parentKey) || [];
     
     if (siblingMessages.length > 1) {
-      // Return all sibling messages as branches
-      return siblingMessages.map(sibling => ({
+      // CRITICAL FIX: Return sibling messages as branches in chronological order
+      // This ensures proper branch navigation and consistent indexing
+      const sortedSiblings = siblingMessages.sort((a, b) => 
+        a.timestamp.getTime() - b.timestamp.getTime()
+      );
+      
+      console.log('Found branches for message:', messageId, 'siblings:', sortedSiblings.map(s => s.content));
+      console.log('Branch order (by timestamp):', sortedSiblings.map(s => new Date(s.timestamp).toLocaleTimeString()));
+      
+      return sortedSiblings.map(sibling => ({
         id: sibling.id,
         preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
         messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
@@ -1172,16 +1240,33 @@
   // Get current branch index for a specific message
   function getCurrentBranchIndexForMessage(messageId: string): number {
     if (!activeChat) return 0;
+    
+    // CRITICAL FIX: Get branches for THIS specific message, not the selected branch
     const branches = getBranchesForMessage(messageId);
     if (branches.length === 0) return 0;
     
-    // Find which branch is currently selected for this message
-    const currentBranch = branches.find(branch => branch.id === selectedBranchId);
-    if (currentBranch) {
-      return branches.findIndex(branch => branch.id === selectedBranchId);
+    // Find which branch this specific message belongs to
+    const message = activeChat.messages.find(m => m.id === messageId);
+    if (!message) return 0;
+    
+    // Find the index of this message within its sibling group
+    const parentKey = message.parentId || 'root';
+    const siblingMessages = activeChat.messages.filter(m => 
+      (m.parentId || 'root') === parentKey
+    );
+    
+    if (siblingMessages.length > 1) {
+      // Sort siblings by timestamp to maintain consistent order
+      const sortedSiblings = siblingMessages.sort((a, b) => 
+        a.timestamp.getTime() - b.timestamp.getTime()
+      );
+      
+      // Find the index of this message in its sibling group
+      const messageIndex = sortedSiblings.findIndex(m => m.id === messageId);
+      console.log(`Message "${message.content.substring(0, 30)}..." is at index ${messageIndex} of ${sortedSiblings.length} siblings`);
+      return messageIndex;
     }
     
-    // If no branch is selected for this message, default to first
     return 0;
   }
   
@@ -1189,9 +1274,18 @@
   function selectPreviousBranchForMessage(messageId: string) {
     const branches = getBranchesForMessage(messageId);
     const currentIndex = getCurrentBranchIndexForMessage(messageId);
+    
+    console.log('=== selectPreviousBranchForMessage ===');
+    console.log('Message ID:', messageId);
+    console.log('Available branches:', branches.map(b => b.preview));
+    console.log('Current index:', currentIndex);
+    
     if (currentIndex > 0) {
       const previousBranch = branches[currentIndex - 1];
+      console.log('Navigating to previous branch:', previousBranch.id, previousBranch.preview);
       selectBranch(previousBranch.id);
+    } else {
+      console.log('Already at first branch, cannot go previous');
     }
   }
   
@@ -1199,9 +1293,18 @@
   function selectNextBranchForMessage(messageId: string) {
     const branches = getBranchesForMessage(messageId);
     const currentIndex = getCurrentBranchIndexForMessage(messageId);
+    
+    console.log('=== selectNextBranchForMessage ===');
+    console.log('Message ID:', messageId);
+    console.log('Available branches:', branches.map(b => b.preview));
+    console.log('Current index:', currentIndex);
+    
     if (currentIndex < branches.length - 1) {
       const nextBranch = branches[currentIndex + 1];
+      console.log('Navigating to next branch:', nextBranch.id, nextBranch.preview);
       selectBranch(nextBranch.id);
+    } else {
+      console.log('Already at last branch, cannot go next');
     }
   }
 
@@ -1219,13 +1322,23 @@
       const siblingMessages = activeChat.messages.filter(m => m.parentId === message.parentId);
       
       if (siblingMessages.length > 1) {
-        // Update available branches
+        // CRITICAL FIX: Update available branches without resetting selection
         const rootMessages = activeChat.messages.filter(msg => !msg.parentId);
         availableBranches = rootMessages.map(root => ({
           id: root.id,
           preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
+          // CRITICAL FIX: Always use activeChat.messages for consistent message counting
           messageCount: getBranchMessageCount(activeChat.messages, root.id)
         }));
+        
+        // CRITICAL FIX: Maintain current branch selection if possible
+        if (selectedBranchId && availableBranches.some(b => b.id === selectedBranchId)) {
+          console.log('Maintaining current branch selection after refresh:', selectedBranchId);
+        } else if (availableBranches.length > 0) {
+          // Select the LAST branch by default (most recent)
+          selectedBranchId = availableBranches[availableBranches.length - 1].id;
+          console.log('Refresh completed, new default branch selected:', selectedBranchId);
+        }
         
         // Force re-render
         activeChat = { ...activeChat };
