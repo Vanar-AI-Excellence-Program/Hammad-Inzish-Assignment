@@ -39,6 +39,46 @@
     };
   }
 
+  // Copy to clipboard function
+  async function copyToClipboard(text: string, buttonElement?: HTMLElement) {
+    try {
+      await navigator.clipboard.writeText(text);
+      
+      // Show feedback on the button if provided
+      if (buttonElement) {
+        const originalText = buttonElement.textContent;
+        buttonElement.textContent = 'Copied!';
+        buttonElement.classList.add('bg-green-600');
+        
+        // Revert back after 2 seconds
+        setTimeout(() => {
+          buttonElement.textContent = originalText;
+          buttonElement.classList.remove('bg-green-600');
+        }, 2000);
+      }
+    } catch (err) {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      
+      // Show feedback even for fallback
+      if (buttonElement) {
+        const originalText = buttonElement.textContent;
+        buttonElement.textContent = 'Copied!';
+        buttonElement.classList.add('bg-green-600');
+        
+        setTimeout(() => {
+          buttonElement.textContent = originalText;
+          buttonElement.classList.remove('bg-green-600');
+        }, 2000);
+      }
+    }
+  }
+
 
 
   function renderMarkdownLite(src: string): string {
@@ -49,25 +89,30 @@
     text = text.replace(/^## (.*$)/gim, '<h2 class="text-xl font-semibold mt-4 mb-2">$1</h2>');
     text = text.replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold mt-4 mb-2">$1</h1>');
     
-         // Code fences ```lang\ncode\n``` with syntax highlighting
-     text = text.replace(/```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-       const cls = lang ? ` class="language-${lang}"` : '';
-       const langLabel = lang ? `<div class="text-xs text-gray-300 mb-2 font-mono bg-gray-700 px-2 py-1 rounded">${lang}</div>` : '';
-       const escapedCode = code.trim()
-         .replace(/&/g, '&amp;')
-         .replace(/</g, '&lt;')
-         .replace(/>/g, '&gt;');
-       return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${langLabel}${escapedCode}</code></pre></div>`;
-     });
+                 // Code fences ```lang\ncode\n``` with syntax highlighting
+        text = text.replace(/```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+          const cls = lang ? ` class="language-${lang}"` : '';
+          const langLabel = lang ? `<div class="text-xs text-gray-300 mb-2 font-mono bg-gray-700 px-2 py-1 rounded">${lang}</div>` : '';
+          const escapedCode = code.trim()
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          
+          // Create a copy button that will be handled by the setHtml action
+          const copyButton = `<button class="code-copy-btn absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white px-2 py-1 rounded text-xs transition-colors cursor-pointer active:scale-95" data-code="${escapedCode.replace(/"/g, '&quot;')}">Copy</button>`;
+          
+          return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg relative" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;">${copyButton}${langLabel}<pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${escapedCode}</code></pre></div>`;
+        });
      
-     // Inline code `code`
-     text = text.replace(/`([^`]+)`/g, (_m, code) => {
-       const escapedCode = code
-         .replace(/&/g, '&amp;')
-         .replace(/</g, '&lt;')
-         .replace(/>/g, '&gt;');
-       return `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapedCode}</code>`;
-     });
+             // Inline code `code`
+        text = text.replace(/`([^`]+)`/g, (_m, code) => {
+          const escapedCode = code
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          
+          return `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600 relative group" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapedCode}<button class="inline-code-copy-btn absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 bg-gray-600 hover:bg-gray-500 text-gray-300 hover:text-white px-1 py-0.5 rounded text-xs transition-all duration-200 cursor-pointer active:scale-95" data-code="${escapedCode.replace(/"/g, '&quot;')}">Copy</button></code>`;
+        });
     
     // Bold **text** and __text__
     text = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
@@ -132,6 +177,20 @@
   let messagesContainer: HTMLDivElement;
 
   onMount(() => {
+    // Add global copy function for code blocks
+    (window as any).copyCodeToClipboard = copyToClipboard;
+    
+    // Add event listener for code block copy buttons
+    document.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      if (target.classList.contains('code-copy-btn') || target.classList.contains('inline-code-copy-btn')) {
+        const code = target.getAttribute('data-code');
+        if (code) {
+          copyToClipboard(code, target);
+        }
+      }
+    });
+    
     // Convert DB data to local format
     if (data.chats && data.chats.length > 0) {
       chats = data.chats.map((chat: any) => ({
@@ -1571,21 +1630,21 @@
   <div class="w-80 bg-gray-50 border-r border-gray-200 flex flex-col min-h-0">
     <div class="p-4 border-b border-gray-200">
       <div class="flex gap-2">
-        <button
-          onclick={createNewChat}
-          class="flex-1 bg-blue-600 text-white rounded-lg px-4 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-blue-700 transition-colors"
-        >
+                 <button
+           onclick={createNewChat}
+           class="flex-1 bg-blue-600 text-white rounded-lg px-4 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-blue-700 active:scale-95 transition-all duration-200"
+         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
           </svg>
           New Chat
         </button>
-                 <button
-           onclick={refreshChats}
-           class="bg-gray-500 text-white rounded-lg px-3 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-gray-600 transition-colors"
-           title="Refresh chats"
-           aria-label="Refresh chats"
-         >
+                                   <button
+            onclick={refreshChats}
+            class="bg-gray-500 text-white rounded-lg px-3 py-2 text-sm flex items-center justify-center gap-2 cursor-pointer hover:bg-gray-600 active:scale-95 transition-all duration-200"
+            title="Refresh chats"
+            aria-label="Refresh chats"
+          >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
           </svg>
@@ -1625,18 +1684,18 @@
           {/if}
           <div class="text-xs text-gray-500 mt-1">{chat.createdAt.toLocaleDateString()}</div>
           <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-            <button
-              onclick={(e) => { e.stopPropagation(); startRename(chat); }}
-              class="text-gray-500 hover:text-gray-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded"
-              aria-label="Rename chat"
-            >
+                         <button
+               onclick={(e) => { e.stopPropagation(); startRename(chat); }}
+               class="text-gray-500 hover:text-gray-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
+               aria-label="Rename chat"
+             >
               ✎
             </button>
-            <button
-              onclick={(e) => { e.stopPropagation(); deleteChat(chat.id); }}
-              class="text-red-500 hover:text-red-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded"
-              aria-label="Delete chat"
-            >
+                         <button
+               onclick={(e) => { e.stopPropagation(); deleteChat(chat.id); }}
+               class="text-red-500 hover:text-red-700 text-xs cursor-pointer p-1 hover:bg-gray-200 rounded active:scale-95 transition-transform"
+               aria-label="Delete chat"
+             >
               ✕
             </button>
           </div>
@@ -1678,12 +1737,12 @@
               <div class="max-w-3xl group">
                 <div class="flex items-start gap-2">
                   {#if message.role === 'user'}
-                    <button
-                      class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                      title="Edit this message"
-                      aria-label="Edit this message"
-                      onclick={() => startEditMessage(message)}
-                    >
+                                         <button
+                       class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer active:scale-95 transition-transform"
+                       title="Edit this message"
+                       aria-label="Edit this message"
+                       onclick={() => startEditMessage(message)}
+                     >
                       <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="m18.5 2.5 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
@@ -1691,13 +1750,13 @@
                     </button>
                   {/if}
                   {#if message.role === 'assistant'}
-                    <button
-                      class="mt-1 text-green-600 hover:text-green-800 cursor-pointer"
-                      title="Regenerate response"
-                      aria-label="Regenerate response"
-                      onclick={() => regenerateResponse(message)}
-                      disabled={isRegeneratingResponse}
-                    >
+                                         <button
+                       class="mt-1 text-green-600 hover:text-green-800 cursor-pointer active:scale-95 transition-transform"
+                       title="Regenerate response"
+                       aria-label="Regenerate response"
+                       onclick={() => regenerateResponse(message)}
+                       disabled={isRegeneratingResponse}
+                     >
                       <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                       </svg>
@@ -1726,28 +1785,38 @@
                            }}
                          ></textarea>
                          <div class="flex gap-2">
-                           <button
-                             onclick={confirmEdit}
-                             class="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 transition-colors"
-                           >
-                             Save
-                           </button>
-                           <button
-                             onclick={cancelEdit}
-                             class="px-3 py-1 bg-gray-500 text-white text-xs rounded hover:bg-gray-600 transition-colors"
-                           >
-                             Cancel
-                           </button>
+                                                       <button
+                              onclick={confirmEdit}
+                              class="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 active:scale-95 transition-all duration-200 cursor-pointer"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onclick={cancelEdit}
+                              class="px-3 py-1 bg-gray-500 text-white text-xs rounded hover:bg-gray-600 active:scale-95 transition-all duration-200 cursor-pointer"
+                            >
+                              Cancel
+                            </button>
                          </div>
                        </div>
-                     {:else}
-                       <!-- Normal message display -->
-                       {#if message.role === 'assistant'}
-                         <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
-                       {:else}
-                         <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
-                       {/if}
-                     {/if}
+                      {:else}
+                                                 <!-- Normal message display -->
+                         <div class="relative group">
+                                                       <!-- Copy button above the message bubble -->
+                            <button
+                              onclick={(e) => copyToClipboard(message.content, e.currentTarget)}
+                              class="absolute -top-8 right-0 opacity-0 group-hover:opacity-100 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white px-2 py-1 rounded text-xs transition-all duration-200 z-10 cursor-pointer active:scale-95"
+                              title="Copy message"
+                            >
+                              Copy
+                            </button>
+                           {#if message.role === 'assistant'}
+                             <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
+                           {:else}
+                             <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
+                           {/if}
+                         </div>
+                      {/if}
 
                       <!-- Branch Navigation Arrows - Only for user messages and only on hover -->
                       {#if !editingMessageId && message.role === 'user' && hasMultipleBranches(message.id)}
@@ -1755,32 +1824,32 @@
                           <div class="flex items-center justify-center gap-2">
 
                             
-                            <!-- Previous Branch Button -->
-                            {#if getCurrentBranchIndexForMessage(message.id) > 0}
-                              <button
-                                class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors"
-                                onclick={() => selectPreviousBranchForMessage(message.id)}
-                                title="Previous version"
-                              >
-                                ←
-                              </button>
-                            {/if}
+                                                         <!-- Previous Branch Button -->
+                             {#if getCurrentBranchIndexForMessage(message.id) > 0}
+                               <button
+                                 class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors cursor-pointer active:scale-95"
+                                 onclick={() => selectPreviousBranchForMessage(message.id)}
+                                 title="Previous version"
+                               >
+                                 ←
+                               </button>
+                             {/if}
                             
                             <!-- Current Branch Display -->
                             <span class="px-2 py-1 text-xs bg-gray-600 text-white rounded">
                               {getCurrentBranchIndexForMessage(message.id) + 1} of {getBranchesForMessage(message.id).length}
                             </span>
                             
-                            <!-- Next Branch Button -->
-                            {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
-                              <button
-                                class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors"
-                                onclick={() => selectNextBranchForMessage(message.id)}
-                                title="Next version"
-                              >
-                                →
-                              </button>
-                            {/if}
+                                                         <!-- Next Branch Button -->
+                             {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
+                               <button
+                                 class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors cursor-pointer active:scale-95"
+                                 onclick={() => selectNextBranchForMessage(message.id)}
+                                 title="Next version"
+                               >
+                                 →
+                               </button>
+                             {/if}
                           </div>
                         </div>
 
@@ -1792,32 +1861,32 @@
                           <div class="flex items-center justify-center gap-2">
 
                             
-                            <!-- Previous Branch Button -->
-                            {#if getCurrentBranchIndexForMessage(message.id) > 0}
-                              <button
-                                class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors"
-                                onclick={() => selectPreviousBranchForMessage(message.id)}
-                                title="Previous response"
-                              >
-                                ←
-                              </button>
-                            {/if}
+                                                         <!-- Previous Branch Button -->
+                             {#if getCurrentBranchIndexForMessage(message.id) > 0}
+                               <button
+                                 class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors cursor-pointer active:scale-95"
+                                 onclick={() => selectPreviousBranchForMessage(message.id)}
+                                 title="Previous response"
+                               >
+                                 ←
+                               </button>
+                             {/if}
                             
                             <!-- Current Branch Display -->
                             <span class="px-2 py-1 text-xs bg-gray-600 text-white rounded">
                               {getCurrentBranchIndexForMessage(message.id) + 1} of {getBranchesForMessage(message.id).length}
                             </span>
                             
-                            <!-- Next Branch Button -->
-                            {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
-                              <button
-                                class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors"
-                                onclick={() => selectNextBranchForMessage(message.id)}
-                                title="Next response"
-                              >
-                                →
-                              </button>
-                            {/if}
+                                                         <!-- Next Branch Button -->
+                             {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
+                               <button
+                                 class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors cursor-pointer active:scale-95"
+                                 onclick={() => selectNextBranchForMessage(message.id)}
+                                 title="Next response"
+                               >
+                                 →
+                               </button>
+                             {/if}
                           </div>
                         </div>
 
@@ -1872,23 +1941,23 @@
         </div>
         
                  <div class="flex gap-2">
-           <button
-             onclick={sendMessage}
-             disabled={loading || !input.trim()}
-             class="p-3 bg-green-600 text-white rounded-full hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
-             aria-label="Send message"
-           >
+                       <button
+              onclick={sendMessage}
+              disabled={loading || !input.trim()}
+              class="p-3 bg-green-600 text-white rounded-full hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition-all duration-200 cursor-pointer"
+              aria-label="Send message"
+            >
              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
              </svg>
            </button>
            {#if loading}
-             <button
-               onclick={stopResponse}
-               class="p-3 bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors cursor-pointer"
-               aria-label="Stop response"
-               title="Stop response"
-             >
+                           <button
+                onclick={stopResponse}
+                class="p-3 bg-red-600 text-white rounded-full hover:bg-red-700 active:scale-95 transition-all duration-200 cursor-pointer"
+                aria-label="Stop response"
+                title="Stop response"
+              >
                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                </svg>
@@ -1979,12 +2048,51 @@
     color: rgb(229 231 235) !important;
   }
 
-  /* Force user message text to be white */
-  .bg-indigo-600 {
-    color: white !important;
-  }
+     /* Force user message text to be white */
+   .bg-indigo-600 {
+     color: white !important;
+   }
 
-  .bg-indigo-600 * {
-    color: white !important;
-  }
+   .bg-indigo-600 * {
+     color: white !important;
+   }
+
+   /* Copy button positioning and styling */
+   .relative {
+     position: relative;
+   }
+
+   .group:hover .opacity-0 {
+     opacity: 1;
+   }
+
+   /* Ensure copy buttons don't interfere with text selection */
+   .prose button {
+     pointer-events: auto;
+     z-index: 10;
+   }
+
+       /* Code block copy button positioning */
+    .prose div[class*="bg-gray-900"] button,
+    .prose div[class*="bg-gray-800"] button {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+    }
+
+    /* Ensure all buttons have proper cursor and transitions */
+    button {
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    /* Disable pointer events for disabled buttons */
+    button:disabled {
+      cursor: not-allowed;
+    }
+
+    /* Smooth scale animation for active state */
+    .active\:scale-95:active {
+      transform: scale(0.95);
+    }
 </style>
