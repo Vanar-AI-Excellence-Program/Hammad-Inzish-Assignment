@@ -466,6 +466,18 @@
     // Update chat title if it's the first message
     if (activeChat.messages.length === 0) {
       activeChat.title = text.length > 50 ? text.substring(0, 50) + '...' : text;
+      
+      // Save the updated title to the database
+      try {
+        await fetch('/api/chat/rename', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: activeChat.id, title: activeChat.title })
+        });
+        console.log('Chat title updated in database:', activeChat.title);
+      } catch (error) {
+        console.error('Failed to update chat title in database:', error);
+      }
     }
 
          // compute parent for tree fork
@@ -570,29 +582,34 @@
       chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
 
       if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
-          
-          for (const line of lines) {
-            const m = line.match(/^0:(.*)$/);
-            if (m) {
-              try {
-                const decoded = JSON.parse(m[1]);
-                assistantText += decoded;
-                activeChat.messages = activeChat.messages.map((msg) =>
-                  msg.id === assistantId ? { ...msg, content: assistantText } : msg
-                );
-                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
-                scrollToBottom();
-              } catch (_) {
-                // ignore malformed lines
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              const m = line.match(/^0:(.*)$/);
+              if (m) {
+                try {
+                  const decoded = JSON.parse(m[1]);
+                  assistantText += decoded;
+                  activeChat.messages = activeChat.messages.map((msg) =>
+                    msg.id === assistantId ? { ...msg, content: assistantText } : msg
+                  );
+                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  scrollToBottom();
+                } catch (_) {
+                  // ignore malformed lines
+                }
               }
             }
           }
+        } catch (streamError) {
+          console.error('Error during streaming:', streamError);
+          throw new Error('Failed to stream AI response');
         }
       }
 
@@ -825,6 +842,13 @@
     editingMessage = null;
     editInput = '';
 
+    // Set loading state for edit operation
+    loading = true;
+    scrollToBottom();
+    
+    // Create new AbortController for this request
+    abortController = new AbortController();
+
     try {
       // Find the original message being edited
       const originalMessage = activeChat.messages.find(m => m.id === messageIdToEdit);
@@ -942,11 +966,13 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           messages: branchContext
-        })
+        }),
+        signal: abortController.signal
       });
 
       if (!response.ok) {
-        throw new Error('Failed to get AI response');
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to get AI response');
       }
 
       // Add placeholder message for streaming
@@ -973,29 +999,34 @@
       let assistantText = '';
 
       if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
 
-          for (const line of lines) {
-            const m = line.match(/^0:(.*)$/);
-            if (m) {
-              try {
-                const decoded = JSON.parse(m[1]);
-                assistantText += decoded;
-                activeChat.messages = activeChat.messages.map((msg) =>
-                  msg.id === assistantId ? { ...msg, content: assistantText } : msg
-                );
-                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
-                scrollToBottom();
-              } catch (_) {
-                // ignore malformed lines
+            for (const line of lines) {
+              const m = line.match(/^0:(.*)$/);
+              if (m) {
+                try {
+                  const decoded = JSON.parse(m[1]);
+                  assistantText += decoded;
+                  activeChat.messages = activeChat.messages.map((msg) =>
+                    msg.id === assistantId ? { ...msg, content: assistantText } : msg
+                  );
+                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  scrollToBottom();
+                } catch (_) {
+                  // ignore malformed lines
+                }
               }
             }
           }
+        } catch (streamError) {
+          console.error('Error during streaming:', streamError);
+          throw new Error('Failed to stream AI response');
         }
       }
 
@@ -1032,19 +1063,23 @@
         isGeneratingResponse = false;
         isUpdatingUI = false;
         
-        // The messages are already in the local state, just need to force a re-render
-        // to ensure the navigation buttons appear
+        // Force a re-render to ensure the navigation buttons appear
         activeChat = { ...activeChat };
         chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
         
-
-        
       } catch (e) {
-        console.error('Failed to save messages:', e);
+        console.error('Failed to save regenerated message:', e);
       }
-
+      
     } catch (e) {
       console.error('Error editing message:', e);
+    } finally {
+      // Always reset loading state and flags
+      loading = false;
+      isStreaming = false;
+      isGeneratingResponse = false;
+      isUpdatingUI = false;
+      isRegeneratingResponse = false;
     }
   }
 
@@ -1504,6 +1539,13 @@
     // Set regeneration flag to prevent multiple calls
     isRegeneratingResponse = true;
     
+    // Set loading state for regeneration
+    loading = true;
+    scrollToBottom();
+    
+    // Create new AbortController for this request
+    abortController = new AbortController();
+
     try {
       // Find the parent user message of this AI response
       const parentUserMessage = activeChat.messages.find(m => m.id === assistantMessage.parentId);
@@ -1598,11 +1640,13 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           messages: branchContext
-        })
+        }),
+        signal: abortController.signal
       });
 
       if (!response.ok) {
-        throw new Error('Failed to get AI response');
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to get AI response');
       }
 
       // Set all flags to prevent branch checking during response generation
@@ -1616,29 +1660,34 @@
       let assistantText = '';
 
       if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
 
-          for (const line of lines) {
-            const m = line.match(/^0:(.*)$/);
-            if (m) {
-              try {
-                const decoded = JSON.parse(m[1]);
-                assistantText += decoded;
-                activeChat.messages = activeChat.messages.map((msg) =>
-                  msg.id === newAssistantId ? { ...msg, content: assistantText } : msg
-                );
-                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
-                scrollToBottom();
-              } catch (_) {
-                // ignore malformed lines
+            for (const line of lines) {
+              const m = line.match(/^0:(.*)$/);
+              if (m) {
+                try {
+                  const decoded = JSON.parse(m[1]);
+                  assistantText += decoded;
+                  activeChat.messages = activeChat.messages.map((msg) =>
+                    msg.id === newAssistantId ? { ...msg, content: assistantText } : msg
+                  );
+                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  scrollToBottom();
+                } catch (_) {
+                  // ignore malformed lines
+                }
               }
             }
           }
+        } catch (streamError) {
+          console.error('Error during streaming:', streamError);
+          throw new Error('Failed to stream AI response');
         }
       }
 
@@ -1672,8 +1721,12 @@
     } catch (e) {
       console.error('Error regenerating response:', e);
     } finally {
-      // Always reset the regeneration flag
+      // Always reset the regeneration flag and loading state
       isRegeneratingResponse = false;
+      loading = false;
+      isStreaming = false;
+      isGeneratingResponse = false;
+      isUpdatingUI = false;
     }
   }
 
