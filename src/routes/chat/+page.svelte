@@ -112,9 +112,9 @@
       if (line.startsWith('<') && line.endsWith('>')) {
         return line;
       }
-      // Skip empty lines
+      // Skip empty lines entirely to prevent extra spacing
       if (!line) {
-        return '<br>';
+        return '';
       }
       // Skip list items, headers, blockquotes, etc. that are already processed
       if (line.startsWith('<li>') || line.startsWith('<h') || line.startsWith('<blockquote>') || 
@@ -1206,6 +1206,9 @@
   // Flag to completely disable branch checking during response generation
   let isGeneratingResponse = false;
   
+  // Flag to prevent branch checking during regeneration
+  let isRegeneratingResponse = false;
+  
   // Debounce mechanism to prevent excessive branch checking
   let lastBranchCheck = 0;
   const BRANCH_CHECK_DEBOUNCE = 100; // 100ms debounce
@@ -1305,6 +1308,218 @@
       selectBranch(nextBranch.id);
     } else {
       console.log('Already at last branch, cannot go next');
+    }
+  }
+
+  // Global branch navigation functions for keyboard shortcuts
+  function selectPreviousBranch() {
+    if (!activeChat || !selectedBranchId) return;
+    
+    // Find the current branch in availableBranches
+    const currentIndex = availableBranches.findIndex(b => b.id === selectedBranchId);
+    if (currentIndex > 0) {
+      const previousBranch = availableBranches[currentIndex - 1];
+      console.log('Keyboard shortcut: navigating to previous branch:', previousBranch.id, previousBranch.preview);
+      selectBranch(previousBranch.id);
+    } else {
+      console.log('Already at first branch, cannot go previous');
+    }
+  }
+  
+  function selectNextBranch() {
+    if (!activeChat || !selectedBranchId) return;
+    
+    // Find the current branch in availableBranches
+    const currentIndex = availableBranches.findIndex(b => b.id === selectedBranchId);
+    if (currentIndex < availableBranches.length - 1) {
+      const nextBranch = availableBranches[currentIndex + 1];
+      console.log('Keyboard shortcut: navigating to next branch:', nextBranch.id, nextBranch.preview);
+      selectBranch(nextBranch.id);
+    } else {
+      console.log('Already at last branch, cannot go next');
+    }
+  }
+
+  // Regenerate AI response - creates a new branch
+  async function regenerateResponse(assistantMessage: Message) {
+    if (!activeChat || isRegeneratingResponse) return;
+    
+    console.log('=== Regenerating AI response ===');
+    console.log('Assistant message to regenerate:', assistantMessage.content.substring(0, 50) + '...');
+    
+    // Set regeneration flag to prevent multiple calls
+    isRegeneratingResponse = true;
+    
+    try {
+      // Find the parent user message of this AI response
+      const parentUserMessage = activeChat.messages.find(m => m.id === assistantMessage.parentId);
+      if (!parentUserMessage) {
+        console.error('No parent user message found for regeneration');
+        return;
+      }
+      
+      // Create a new AI response as a SIBLING (same parent as original)
+      const newAssistantId = crypto.randomUUID();
+      const newAssistantMsg: Message = {
+        id: newAssistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        parentId: parentUserMessage.id // Same parent - this makes them siblings!
+      };
+      
+      // Add the new assistant message to the chat
+      activeChat.messages = [...activeChat.messages, newAssistantMsg];
+      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Clear branch check cache to ensure fresh results after regeneration
+      branchCheckCache.clear();
+      
+      // Update available branches using the new branch detection logic
+      console.log('=== CALLING getAvailableBranches AFTER REGENERATION ===');
+      availableBranches = getAvailableBranches(activeChat.messages);
+      console.log('=== getAvailableBranches RESULT ===', availableBranches);
+      
+      // Find branches at the level where the regenerated message exists
+      const regeneratedMsgLevel = newAssistantMsg.parentId || 'root';
+      console.log('Looking for branches at level (parentId):', regeneratedMsgLevel);
+      
+      // Get siblings of the regenerated message (all AI responses to the same user message)
+      const regeneratedMsgSiblings = activeChat.messages.filter(msg => 
+        msg.parentId === regeneratedMsgLevel && msg.role === 'assistant'
+      );
+      
+      console.log('AI response siblings:', regeneratedMsgSiblings.map(s => s.content.substring(0, 30) + '...'));
+      
+      if (regeneratedMsgSiblings.length > 1) {
+        // Use the AI response siblings as the available branches
+        availableBranches = regeneratedMsgSiblings.map(sibling => ({
+          id: sibling.id,
+          preview: sibling.content.length > 50 ? sibling.content.substring(0, 50) + '...' : sibling.content,
+          messageCount: getBranchMessageCount(activeChat.messages, sibling.id)
+        }));
+        
+        console.log('Updated availableBranches to AI response level:', availableBranches);
+        selectedBranchId = newAssistantMsg.id; // Select the new response directly
+      } else if (availableBranches.length > 0) {
+        // Fallback: use the deepest branches if no siblings at regenerated level
+        selectedBranchId = availableBranches[0].id;
+      } else {
+        selectedBranchId = null;
+      }
+      
+      console.log('final selectedBranchId:', selectedBranchId);
+      
+      // Force a re-render to show the navigation buttons immediately
+      activeChat = { ...activeChat };
+      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Now get the AI response with streaming using proper branch context
+      const branchContext = (() => {
+        // Build context from the path up to the user message that triggered this AI response
+        const pathToUserMessage = [];
+        let currentMsg = parentUserMessage;
+        
+        // Build path from user message back to root
+        while (currentMsg) {
+          pathToUserMessage.unshift(currentMsg);
+          if (currentMsg.parentId) {
+            currentMsg = activeChat.messages.find(m => m.id === currentMsg.parentId);
+          } else {
+            break;
+          }
+        }
+        
+        console.log('=== AI REGENERATION CONTEXT DEBUG ===');
+        console.log('Path to user message:', pathToUserMessage.map(m => `${m.role}: ${m.content}`));
+        
+        const context = pathToUserMessage.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        console.log('final context sent to AI for regeneration:', context);
+        
+        return context;
+      })();
+      
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: branchContext
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to get AI response');
+      }
+
+      // Set all flags to prevent branch checking during response generation
+      isStreaming = true;
+      isUpdatingUI = true;
+      isGeneratingResponse = true;
+      
+      // Stream the response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let assistantText = '';
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            const m = line.match(/^0:(.*)$/);
+            if (m) {
+              try {
+                const decoded = JSON.parse(m[1]);
+                assistantText += decoded;
+                activeChat.messages = activeChat.messages.map((msg) =>
+                  msg.id === newAssistantId ? { ...msg, content: assistantText } : msg
+                );
+                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                scrollToBottom();
+              } catch (_) {
+                // ignore malformed lines
+              }
+            }
+          }
+        }
+      }
+
+      // Save the regenerated message to DB
+      try {
+        await fetch('/api/chat/message', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: newAssistantId,
+            chatId: activeChat.id,
+            parentId: parentUserMessage.id, // Child of user message
+            role: 'assistant',
+            content: assistantText
+          })
+        });
+        
+        // Response generation complete, reset all flags
+        isStreaming = false;
+        isGeneratingResponse = false;
+        isUpdatingUI = false;
+        
+        // Force a re-render to ensure the navigation buttons appear
+        activeChat = { ...activeChat };
+        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        
+      } catch (e) {
+        console.error('Failed to save regenerated message:', e);
+      }
+      
+    } catch (e) {
+      console.error('Error regenerating response:', e);
+    } finally {
+      // Always reset the regeneration flag
+      isRegeneratingResponse = false;
     }
   }
 
@@ -1462,26 +1677,37 @@
             <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div class="max-w-3xl group">
                 <div class="flex items-start gap-2">
-                  <button
-                    class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                    title="Edit this message"
-                    aria-label="Edit this message"
-                    onclick={() => startEditMessage(message)}
-                  >
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                      <path d="m18.5 2.5 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                    </svg>
-                  </button>
+                  {#if message.role === 'user'}
+                    <button
+                      class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                      title="Edit this message"
+                      aria-label="Edit this message"
+                      onclick={() => startEditMessage(message)}
+                    >
+                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="m18.5 2.5 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                      </svg>
+                    </button>
+                  {/if}
+                  {#if message.role === 'assistant'}
+                    <button
+                      class="mt-1 text-green-600 hover:text-green-800 cursor-pointer"
+                      title="Regenerate response"
+                      aria-label="Regenerate response"
+                      onclick={() => regenerateResponse(message)}
+                      disabled={isRegeneratingResponse}
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                      </svg>
+                    </button>
+                  {/if}
                   <div class={`rounded-2xl px-4 py-3 ${
                     message.role === 'user' 
                       ? 'bg-indigo-600 text-white' 
                       : 'bg-gray-50 text-gray-900 border border-gray-200'
                   }`}>
-                    
-                     
-
-                    
                                          {#if editingMessageId === message.id}
                        <!-- Inline edit interface -->
                        <div class="space-y-3">
@@ -1551,6 +1777,43 @@
                                 class="px-2 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 border border-blue-600 rounded transition-colors"
                                 onclick={() => selectNextBranchForMessage(message.id)}
                                 title="Next version"
+                              >
+                                →
+                              </button>
+                            {/if}
+                          </div>
+                        </div>
+
+                      {/if}
+
+                      <!-- Branch Navigation Arrows for AI responses - Only on hover -->
+                      {#if !editingMessageId && message.role === 'assistant' && hasMultipleBranches(message.id)}
+                        <div class="mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <div class="flex items-center justify-center gap-2">
+
+                            
+                            <!-- Previous Branch Button -->
+                            {#if getCurrentBranchIndexForMessage(message.id) > 0}
+                              <button
+                                class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors"
+                                onclick={() => selectPreviousBranchForMessage(message.id)}
+                                title="Previous response"
+                              >
+                                ←
+                              </button>
+                            {/if}
+                            
+                            <!-- Current Branch Display -->
+                            <span class="px-2 py-1 text-xs bg-gray-600 text-white rounded">
+                              {getCurrentBranchIndexForMessage(message.id) + 1} of {getBranchesForMessage(message.id).length}
+                            </span>
+                            
+                            <!-- Next Branch Button -->
+                            {#if getCurrentBranchIndexForMessage(message.id) < getBranchesForMessage(message.id).length - 1}
+                              <button
+                                class="px-2 py-1 text-xs bg-green-500 text-white hover:bg-green-600 border border-green-600 rounded transition-colors"
+                                onclick={() => selectNextBranchForMessage(message.id)}
+                                title="Next response"
                               >
                                 →
                               </button>
