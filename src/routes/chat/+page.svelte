@@ -52,15 +52,32 @@
       
       // Show feedback on the button if provided
       if (buttonElement) {
-        const originalText = buttonElement.textContent;
+        // Store original text only if it's not already "Copied!"
+        let originalText = buttonElement.dataset.originalText || buttonElement.textContent;
+        if (buttonElement.textContent === 'Copied!') {
+          originalText = buttonElement.dataset.originalText || 'Copy';
+        } else {
+          buttonElement.dataset.originalText = originalText;
+        }
+        
+        // Clear any existing timeout to prevent conflicts
+        if (buttonElement.dataset.timeoutId) {
+          clearTimeout(parseInt(buttonElement.dataset.timeoutId));
+        }
+        
         buttonElement.textContent = 'Copied!';
         buttonElement.classList.add('bg-green-600');
+        buttonElement.style.backgroundColor = '#059669 !important';
         
         // Revert back after 2 seconds
-        setTimeout(() => {
+        const timeoutId = setTimeout(() => {
           buttonElement.textContent = originalText;
           buttonElement.classList.remove('bg-green-600');
+          buttonElement.style.backgroundColor = '';
+          delete buttonElement.dataset.timeoutId;
         }, 2000);
+        
+        buttonElement.dataset.timeoutId = timeoutId.toString();
       }
     } catch (err) {
       // Fallback for older browsers
@@ -73,14 +90,31 @@
       
       // Show feedback even for fallback
       if (buttonElement) {
-        const originalText = buttonElement.textContent;
+        // Store original text only if it's not already "Copied!"
+        let originalText = buttonElement.dataset.originalText || buttonElement.textContent;
+        if (buttonElement.textContent === 'Copied!') {
+          originalText = buttonElement.dataset.originalText || 'Copy';
+        } else {
+          buttonElement.dataset.originalText = originalText;
+        }
+        
+        // Clear any existing timeout to prevent conflicts
+        if (buttonElement.dataset.timeoutId) {
+          clearTimeout(parseInt(buttonElement.dataset.timeoutId));
+        }
+        
         buttonElement.textContent = 'Copied!';
         buttonElement.classList.add('bg-green-600');
+        buttonElement.style.backgroundColor = '#059669 !important';
         
-        setTimeout(() => {
+        const timeoutId = setTimeout(() => {
           buttonElement.textContent = originalText;
           buttonElement.classList.remove('bg-green-600');
+          buttonElement.style.backgroundColor = '';
+          delete buttonElement.dataset.timeoutId;
         }, 2000);
+        
+        buttonElement.dataset.timeoutId = timeoutId.toString();
       }
     }
   }
@@ -104,10 +138,11 @@
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
           
-          // Create a copy button that will be handled by the setHtml action
-          const copyButton = `<button class="code-copy-btn absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white px-2 py-1 rounded text-xs transition-colors cursor-pointer active:scale-95" data-code="${escapedCode.replace(/"/g, '&quot;')}">Copy</button>`;
+          // Use base64 encoding to safely store the original code in the data attribute
+          const base64Code = btoa(unescape(encodeURIComponent(code.trim())));
+          const copyButton = `<button class="code-copy-btn bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white px-2 py-1 rounded text-xs transition-colors cursor-pointer active:scale-95" data-code-b64="${base64Code}">Copy</button>`;
           
-          return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg relative" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;">${copyButton}${langLabel}<pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${escapedCode}</code></pre></div>`;
+          return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><div class="flex justify-between items-center mb-3">${langLabel}${copyButton}</div><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${escapedCode}</code></pre></div>`;
         });
      
              // Inline code `code`
@@ -117,7 +152,10 @@
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
           
-          return `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600 relative group" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapedCode}<button class="inline-code-copy-btn absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 bg-gray-600 hover:bg-gray-500 text-gray-300 hover:text-white px-1 py-0.5 rounded text-xs transition-all duration-200 cursor-pointer active:scale-95" data-code="${escapedCode.replace(/"/g, '&quot;')}">Copy</button></code>`;
+          // Use base64 encoding for inline code as well to be safe
+          const base64Code = btoa(unescape(encodeURIComponent(code)));
+          
+          return `<code class="bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm font-mono border border-gray-600 relative group" style="background-color: rgb(31 41 55) !important; color: rgb(229 231 235) !important;">${escapedCode}<button class="inline-code-copy-btn absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 bg-gray-600 hover:bg-gray-500 text-gray-300 hover:text-white px-1 py-0.5 rounded text-xs transition-all duration-200 cursor-pointer active:scale-95 z-10" data-code-b64="${base64Code}">Copy</button></code>`;
         });
     
     // Bold **text** and __text__
@@ -186,11 +224,23 @@
     // Add global copy function for code blocks
     (window as any).copyCodeToClipboard = copyToClipboard;
     
-    // Add event listener for code block copy buttons
+    // Add event listener for code block copy buttons (using event delegation)
     document.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
       if (target.classList.contains('code-copy-btn') || target.classList.contains('inline-code-copy-btn')) {
-        const code = target.getAttribute('data-code');
+        let code = target.getAttribute('data-code');
+        
+        // Handle base64 encoded data for code fences
+        const base64Code = target.getAttribute('data-code-b64');
+        if (base64Code) {
+          try {
+            code = decodeURIComponent(escape(atob(base64Code)));
+          } catch (e) {
+            console.warn('Failed to decode base64 code:', e);
+            return;
+          }
+        }
+        
         if (code) {
           copyToClipboard(code, target);
         }
