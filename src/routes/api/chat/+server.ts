@@ -170,20 +170,18 @@ async function callGoogleGenerativeAI(messages: any[], file: File | null): Promi
   // Add system prompt to ensure markdown formatting
   const systemPrompt = {
     role: 'user',
-    parts: [{ text: `You are a helpful AI programming assistant. Keep your responses SHORT and CONCISE:
+    parts: [{ text: `You are a helpful AI programming assistant. Format your responses using markdown:
 
-- Keep responses under 3-4 sentences when possible
 - Use **bold** for emphasis and important terms
 - Use *italic* for code concepts and file names
 - Use \`inline code\` for code snippets, variables, and commands
-- Use \`\`\`language\ncode blocks\n\`\`\` for code examples (keep examples minimal)
-- Use # ## for headers only when absolutely necessary
-- Use - for bullet points sparingly
-- Avoid lengthy explanations unless specifically requested
-- Get straight to the point
-- If asked for code, provide minimal working examples
+- Use \`\`\`language\ncode blocks\n\`\`\` for code examples
+- Use # ## for headers when organizing content
+- Use - for bullet points and lists
+- Provide complete, working code examples when requested
+- Be thorough but organized in your responses
 
-Be brief and direct in your responses.` }]
+When asked for code examples, provide complete, functional implementations with proper syntax highlighting.` }]
   };
 
   // Add file context if available
@@ -203,7 +201,7 @@ Be brief and direct in your responses.` }]
       temperature: 0.7,
       topK: 40,
       topP: 0.95,
-      maxOutputTokens: 300, // Reduced from 1000 to 300 for shorter responses
+      maxOutputTokens: 2048, // Increased for longer code responses
     },
     safetySettings: [
       {
