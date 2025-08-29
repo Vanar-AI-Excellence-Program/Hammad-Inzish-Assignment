@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte';
   import { browser } from '$app/environment';
+  import { highlightCode } from '$lib/syntaxHighlighter';
 
   export let data: {
     user: { id: string; name?: string | null; email?: string | null; role?: string | null };
@@ -133,7 +134,7 @@
         text = text.replace(/```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
           const cls = lang ? ` class="language-${lang}"` : '';
           const langLabel = lang ? `<div class="text-xs text-gray-300 mb-2 font-mono bg-gray-700 px-2 py-1 rounded">${lang}</div>` : '';
-          const escapedCode = code.trim()
+          const escapedCode = code
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
@@ -142,7 +143,7 @@
           const base64Code = btoa(unescape(encodeURIComponent(code.trim())));
           const copyButton = `<button class="code-copy-btn bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white px-2 py-1 rounded text-xs transition-colors cursor-pointer active:scale-95" data-code-b64="${base64Code}">Copy</button>`;
           
-          return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><div class="flex justify-between items-center mb-3">${langLabel}${copyButton}</div><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><code${cls}>${escapedCode}</code></pre></div>`;
+          return `<div class="bg-gray-900 text-gray-100 rounded-lg p-4 my-4 overflow-x-auto border border-gray-600 shadow-lg" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important;"><div class="flex justify-between items-center mb-3">${langLabel}${copyButton}</div><pre class="bg-gray-900 text-gray-100" style="background-color: rgb(17 24 39) !important; color: rgb(229 231 235) !important; white-space: pre; overflow-x: auto;"><code${cls}>${escapedCode}</code></pre></div>`;
         });
      
              // Inline code `code`
@@ -217,6 +218,77 @@
     return processedLines.join('');
   }
 
+  // Svelte action to apply syntax highlighting to code blocks
+  async function applySyntaxHighlighting(node: HTMLElement) {
+    if (!browser) return;
+    
+    const codeBlocks = node.querySelectorAll('pre > code[class*="language-"]:not(.shiki-processed):not(.shiki-processing)');
+    
+    for (const block of codeBlocks) {
+      const codeElement = block as HTMLElement;
+      const preElement = codeElement.parentElement as HTMLElement;
+      const classList = Array.from(codeElement.classList);
+      const languageClass = classList.find(cls => cls.startsWith('language-'));
+      
+      if (languageClass) {
+        const language = languageClass.replace('language-', '');
+        
+        // Mark as processing to prevent re-processing during async operation
+        codeElement.classList.add('shiki-processing');
+        
+        // Get the raw text content from the data attribute or element
+        const codeContainer = preElement.parentElement;
+        const copyButton = codeContainer?.querySelector('.code-copy-btn') as HTMLElement;
+        let rawCode = '';
+        
+        if (copyButton && copyButton.dataset.codeB64) {
+          // Get original code from the copy button's data attribute
+          try {
+            rawCode = decodeURIComponent(escape(atob(copyButton.dataset.codeB64)));
+          } catch (e) {
+            rawCode = codeElement.textContent || '';
+          }
+        } else {
+          rawCode = codeElement.textContent || '';
+        }
+        
+        try {
+          const highlightedHtml = await highlightCode(rawCode, language);
+          
+          // Parse the Shiki HTML and extract just what we need
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = highlightedHtml;
+          const shikiPre = tempDiv.querySelector('pre.shiki');
+          
+          if (shikiPre) {
+            // Copy all Shiki attributes and styles to our existing pre element
+            preElement.className = preElement.className + ' shiki';
+            
+            // Copy the inner HTML from Shiki's pre element
+            preElement.innerHTML = shikiPre.innerHTML;
+            
+            // Mark as completed
+            const newCodeElement = preElement.querySelector('code');
+            if (newCodeElement) {
+              newCodeElement.classList.add('shiki-processed');
+              newCodeElement.classList.remove('shiki-processing');
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to highlight code block:', error);
+          codeElement.classList.remove('shiki-processing');
+        }
+      }
+    }
+    
+    return {
+      update() {
+        // Re-apply highlighting if content changes
+        applySyntaxHighlighting(node);
+      }
+    };
+  }
+
   // Auto-scroll to bottom
   let messagesContainer: HTMLDivElement;
 
@@ -277,6 +349,71 @@
       }
     } else {
       createNewChat();
+    }
+  });
+
+  // Apply syntax highlighting after DOM updates
+  afterUpdate(async () => {
+    if (!browser) return;
+    
+    // Find all unprocessed code blocks and apply syntax highlighting
+    const unprocessedCodeBlocks = document.querySelectorAll('pre > code[class*="language-"]:not(.shiki-processed):not(.shiki-processing)');
+    
+    for (const block of unprocessedCodeBlocks) {
+      const codeElement = block as HTMLElement;
+      const preElement = codeElement.parentElement as HTMLElement;
+      const classList = Array.from(codeElement.classList);
+      const languageClass = classList.find(cls => cls.startsWith('language-'));
+      
+      if (languageClass) {
+        const language = languageClass.replace('language-', '');
+        
+        // Mark as processing to prevent re-processing during async operation
+        codeElement.classList.add('shiki-processing');
+        
+        // Get the raw text content from the data attribute or element
+        const codeContainer = preElement.parentElement;
+        const copyButton = codeContainer?.querySelector('.code-copy-btn') as HTMLElement;
+        let rawCode = '';
+        
+        if (copyButton && copyButton.dataset.codeB64) {
+          // Get original code from the copy button's data attribute
+          try {
+            rawCode = decodeURIComponent(escape(atob(copyButton.dataset.codeB64)));
+          } catch (e) {
+            rawCode = codeElement.textContent || '';
+          }
+        } else {
+          rawCode = codeElement.textContent || '';
+        }
+        
+        try {
+          const highlightedHtml = await highlightCode(rawCode, language);
+          
+          // Parse the Shiki HTML and extract just what we need
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = highlightedHtml;
+          const shikiPre = tempDiv.querySelector('pre.shiki');
+          
+          if (shikiPre) {
+            // Copy all Shiki attributes and styles to our existing pre element
+            preElement.className = preElement.className + ' shiki';
+            
+            // Copy the inner HTML from Shiki's pre element
+            preElement.innerHTML = shikiPre.innerHTML;
+            
+            // Mark as completed
+            const newCodeElement = preElement.querySelector('code');
+            if (newCodeElement) {
+              newCodeElement.classList.add('shiki-processed');
+              newCodeElement.classList.remove('shiki-processing');
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to highlight code block:', error);
+          codeElement.classList.remove('shiki-processing');
+        }
+      }
     }
   });
 
@@ -635,7 +772,11 @@
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Streaming completed successfully
+              loading = false;
+              break;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split('\n');
@@ -659,6 +800,7 @@
           }
         } catch (streamError) {
           console.error('Error during streaming:', streamError);
+          loading = false; // Clear loading on stream error
           throw new Error('Failed to stream AI response');
         }
       }
@@ -1052,7 +1194,11 @@
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Streaming completed successfully
+              loading = false;
+              break;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split('\n');
@@ -1076,6 +1222,7 @@
           }
         } catch (streamError) {
           console.error('Error during streaming:', streamError);
+          loading = false; // Clear loading on stream error
           throw new Error('Failed to stream AI response');
         }
       }
@@ -1713,7 +1860,11 @@
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Streaming completed successfully
+              loading = false;
+              break;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split('\n');
@@ -1737,6 +1888,7 @@
           }
         } catch (streamError) {
           console.error('Error during streaming:', streamError);
+          loading = false; // Clear loading on stream error
           throw new Error('Failed to stream AI response');
         }
       }
@@ -2615,24 +2767,34 @@
     border-radius: 0.5rem !important;
     margin: 1rem 0 !important;
   }
+  
+  /* Ensure proper whitespace handling for all pre elements */
+  .prose pre {
+    white-space: pre !important;
+    overflow-x: auto;
+  }
+  
+  .prose pre code {
+    white-space: pre !important;
+  }
 
-  .prose div[class*="bg-gray-900"] code,
-  .prose div[class*="bg-gray-800"] code {
+  .prose div[class*="bg-gray-900"] code:not(.shiki code),
+  .prose div[class*="bg-gray-800"] code:not(.shiki code) {
     background-color: transparent !important;
     color: rgb(229 231 235) !important;
     border: none !important;
     padding: 0 !important;
   }
 
-  /* Force all inline code to have dark backgrounds */
-  .prose code {
+  /* Force all inline code to have dark backgrounds - but not Shiki code */
+  .prose code:not(.shiki code) {
     background-color: rgb(31 41 55) !important;
     color: rgb(229 231 235) !important;
     border: 1px solid rgb(75 85 99) !important;
   }
 
-  /* Additional direct targeting for code blocks */
-  .prose [class*="language-"] {
+  /* Additional direct targeting for code blocks - but not Shiki */
+  .prose [class*="language-"]:not(.shiki) {
     background-color: rgb(17 24 39) !important;
     color: rgb(229 231 235) !important;
   }
@@ -2747,5 +2909,58 @@
       border-color: rgb(59 130 246);
       box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
     }
+  }
+
+  /* Shiki syntax highlighting styles */
+  :global(.shiki) {
+    background: rgb(17 24 39) !important;
+    border-radius: 0;
+    margin: 0;
+    padding: 0;
+    font-family: 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: pre !important;
+    overflow-x: auto;
+  }
+  
+  :global(.shiki code) {
+    background: transparent !important;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    white-space: pre !important;
+    display: block;
+  }
+  
+  /* Ensure code blocks maintain formatting during processing */
+  :global(.shiki-processing) {
+    white-space: pre !important;
+  }
+  
+  /* Force line break preservation for all Shiki spans */
+  :global(.shiki span) {
+    white-space: pre !important;
+  }
+  
+  /* CRITICAL: Preserve Shiki's inline color styles */
+  :global(.shiki span[style]) {
+    /* Don't override anything - let Shiki's styles through */
+  }
+  
+  /* Ensure prose doesn't interfere with Shiki colors */
+  :global(.prose .shiki *) {
+    background: transparent !important;
+  }
+  
+  /* Remove any color overrides that might conflict */
+  :global(.prose pre.shiki) {
+    background: rgb(17 24 39) !important;
+    color: #e5e7eb;
+  }
+  
+  :global(.prose pre.shiki code) {
+    color: inherit;
+    background: transparent !important;
   }
 </style>

@@ -54,16 +54,17 @@
 		"vitest-browser-svelte": "^0.1.0"
 	},
 	"dependencies": {
+		"@ai-sdk/google": "^1.0.15",
 		"@auth/core": "^0.40.0",
 		"@auth/drizzle-adapter": "^1.10.0",
 		"@auth/sveltekit": "^1.10.0",
+		"ai": "^3.3.13",
 		"bcryptjs": "^3.0.2",
 		"drizzle-orm": "^0.40.0",
 		"nodemailer": "^6.9.12",
 		"postgres": "^3.4.5",
-		"zod": "^3.23.8",
-		"ai": "^3.3.13",
-		"@ai-sdk/google": "^1.0.15"
+		"shiki": "^1.29.2",
+		"zod": "^3.23.8"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
