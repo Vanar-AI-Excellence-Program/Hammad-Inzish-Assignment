@@ -48,23 +48,23 @@ async function searchSimilarChunks(queryEmbedding: number[], limit: number = 5) 
      allDocuments.forEach((doc, idx) => {
        console.log(`  ${idx + 1}. ${doc.title} (${doc.source})`);
      });
-    
-         // Use cosine similarity to find the most similar chunks
+  
+  // Use cosine similarity to find the most similar chunks
      // Increased limit to 8 to get more candidates, then filter by quality
-     const similarChunks = await db
-       .select({
-         chunkId: chunks.id,
-         content: chunks.content,
-         idx: chunks.idx,
-         documentId: chunks.documentId,
-         documentTitle: documents.title,
-         documentSource: documents.source,
-         similarity: sql<number>`1 - (embeddings.embedding::vector <=> ${embeddingJson}::vector)`
-       })
-       .from(chunks)
-       .innerJoin(embeddings, eq(chunks.id, embeddings.chunkId))
-       .innerJoin(documents, eq(chunks.documentId, documents.id))
-       .orderBy(desc(sql<number>`1 - (embeddings.embedding::vector <=> ${embeddingJson}::vector)`))
+  const similarChunks = await db
+    .select({
+      chunkId: chunks.id,
+      content: chunks.content,
+      idx: chunks.idx,
+      documentId: chunks.documentId,
+      documentTitle: documents.title,
+      documentSource: documents.source,
+      similarity: sql<number>`1 - (embeddings.embedding::vector <=> ${embeddingJson}::vector)`
+    })
+    .from(chunks)
+    .innerJoin(embeddings, eq(chunks.id, embeddings.chunkId))
+    .innerJoin(documents, eq(chunks.documentId, documents.id))
+    .orderBy(desc(sql<number>`1 - (embeddings.embedding::vector <=> ${embeddingJson}::vector)`))
        .limit(8); // Get more candidates for better filtering
 
      // Debug: Show what documents we found
@@ -98,13 +98,13 @@ function filterAndRankChunks(chunks: any[], maxChunks: number = 5): any[] {
   const sortedChunks = [...chunks].sort((a, b) => b.similarity - a.similarity);
   console.log(`🔍 Similarity range: ${sortedChunks[0]?.similarity?.toFixed(3) || 'N/A'} - ${sortedChunks[sortedChunks.length-1]?.similarity?.toFixed(3) || 'N/A'}`);
   
-       // Apply quality filters
-     const qualityChunks = sortedChunks.filter(chunk => {
-       // Minimum similarity threshold (15% - lowered for better retrieval)
-       if (chunk.similarity < 0.15) {
-         console.log(`🔍 Chunk filtered out: similarity ${chunk.similarity.toFixed(3)} < 0.15`);
-         return false;
-       }
+  // Apply quality filters
+  const qualityChunks = sortedChunks.filter(chunk => {
+    // Minimum similarity threshold (20% - lowered for better retrieval)
+    if (chunk.similarity < 0.2) {
+      console.log(`🔍 Chunk filtered out: similarity ${chunk.similarity.toFixed(3)} < 0.2`);
+      return false;
+    }
     
     // Minimum content length (avoid very short chunks)
     if (chunk.content.length < 50) {
@@ -161,16 +161,15 @@ async function callGoogleGenerativeAIWithRAG(messages: any[], contextChunks: any
       contextText += `📝 Content:\n${chunk.content}\n`;
       contextText += `---\n`;
     });
-         contextText += `\n**⚠️ CRITICAL INSTRUCTIONS:**\n`;
-     contextText += `1. Base your response on the context above - use the information provided\n`;
-     contextText += `2. If you have relevant context, use it to answer the question - don't say you don't have enough information if context exists\n`;
-     contextText += `3. Use specific information from the context and cite it with <sup>[1]</sup>, <sup>[2]</sup>, etc.\n`;
-     contextText += `4. Answer naturally like ChatGPT - synthesize information in your own words\n`;
-     contextText += `5. Do NOT include any raw HTML or data attributes in your response\n`;
-     contextText += `6. CRITICAL: Write conversationally, not like a formal report or list\n`;
-     contextText += `7. CRITICAL: Connect ideas naturally with transitions and explanations\n`;
-     contextText += `8. CRITICAL: Avoid rigid formatting like numbered lists unless specifically requested\n`;
-     contextText += `9. CRITICAL: If context is provided, use it to answer the question - be helpful and informative\n`;
+    contextText += `\n**⚠️ CRITICAL INSTRUCTIONS:**\n`;
+    contextText += `1. Base your response ONLY on the context above\n`;
+    contextText += `2. If the answer is not in this context, say "I don't have enough information in my knowledge base to answer this question accurately."\n`;
+    contextText += `3. Use specific information from the context and cite it with <sup>[1]</sup>, <sup>[2]</sup>, etc.\n`;
+    contextText += `4. Answer naturally like ChatGPT - synthesize information in your own words\n`;
+    contextText += `5. Do NOT include any raw HTML or data attributes in your response\n`;
+    contextText += `6. CRITICAL: Write conversationally, not like a formal report or list\n`;
+    contextText += `7. CRITICAL: Connect ideas naturally with transitions and explanations\n`;
+    contextText += `8. CRITICAL: Avoid rigid formatting like numbered lists unless specifically requested\n`;
   }
 
   // Convert messages to Google's format
@@ -256,7 +255,7 @@ async function callGoogleGenerativeAIWithRAG(messages: any[], contextChunks: any
   // Build system prompt based on whether we have context and message type
   let systemPromptText = '';
   
-    if (contextChunks.length > 0) {
+  if (contextChunks.length > 0) {
     // Check if this is a document summary request
     if (isDocumentSummaryRequest(userMessage)) {
       systemPromptText = `You are a helpful AI assistant that provides comprehensive document summaries and analysis. 
@@ -332,11 +331,11 @@ IMPORTANT FORMATTING RULES:
          } else {
                systemPromptText = `You are a helpful AI assistant with access to relevant documentation and context. 
 
- CRITICAL ANTI-HALLUCINATION RULES:
- 1. **Use information from the provided context** - if you have relevant context, use it to answer the question
- 2. **ALWAYS cite your sources** - when you use information from the context, cite it with superscript numbers
- 3. **Be helpful and informative** - if context is provided, use it to give a useful answer
- 4. **Don't make assumptions** - stick to what's explicitly stated in the provided context
+CRITICAL ANTI-HALLUCINATION RULES:
+1. **ONLY use information from the provided context** - if the answer is not in the context, say "I don't have enough information in my knowledge base to answer this question accurately."
+2. **ALWAYS cite your sources** - when you use information from the context, cite it with superscript numbers
+3. **Be explicit about limitations** - if the context doesn't contain enough information, acknowledge this
+4. **Don't make assumptions** - stick to what's explicitly stated in the provided context
 
 RESPONSE STYLE REQUIREMENTS:
 1. **Answer naturally and conversationally** - like ChatGPT, not like a formal report
@@ -383,8 +382,8 @@ Respond naturally to this greeting. Be friendly and conversational. Keep your re
 IMPORTANT: Since this is just a greeting, do NOT include any citation sections or technical explanations.
 
 Make your response warm and engaging.`;
-         } else if (isSpecificQuestion(userMessage)) {
-       systemPromptText = `You are a helpful AI programming assistant. 
+    } else if (isSpecificQuestion(userMessage)) {
+      systemPromptText = `You are a helpful AI programming assistant. 
 
 I couldn't find relevant documents in my knowledge base to answer this question specifically, but I can help you with general programming knowledge and concepts.
 
@@ -404,9 +403,9 @@ FORMATTING GUIDELINES:
 - Use proper spacing and formatting for readability
 
 Make your responses beautiful, well-formatted, and easy to read.`;
-         } else {
-       // For other general messages
-       systemPromptText = `You are a helpful AI programming assistant. 
+    } else {
+      // For other general messages
+      systemPromptText = `You are a helpful AI programming assistant. 
 
 Respond naturally and helpfully to this message. Be conversational and engaging.
 
@@ -478,9 +477,9 @@ Make your response beautiful, well-formatted, and appropriate to the context and
     throw new Error(`Google Generative AI API error: ${error.error?.message || response.statusText}`);
   }
 
-    const data = await response.json();
+  const data = await response.json();
   let aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I couldn\'t generate a response.';
-   
+  
   // Return structured response with inline citations
   if (contextChunks.length > 0) {
     // Deduplicate citations by document and chunk
@@ -673,10 +672,10 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       }
     }
 
-         // Get the latest user message for RAG
-     const latestUserMessage = messages.filter(m => m.role === 'user').pop();
-     let aiResponse = '';
-     let contextChunks: any[] = [];
+    // Get the latest user message for RAG
+    const latestUserMessage = messages.filter(m => m.role === 'user').pop();
+    let aiResponse = '';
+    let contextChunks: any[] = [];
      let citations: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }> = [];
 
     try {
@@ -690,9 +689,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         // Search for similar chunks
         contextChunks = await searchSimilarChunks(queryEmbedding, 5);
         
-                 // Filter chunks by similarity threshold (15% minimum similarity for better retrieval)
-         const SIMILARITY_THRESHOLD = 0.15; // 15% - lowered for better retrieval
-         const relevantChunks = contextChunks.filter(chunk => chunk.similarity >= SIMILARITY_THRESHOLD);
+                 // Filter chunks by similarity threshold (20% minimum similarity for better retrieval)
+         const SIMILARITY_THRESHOLD = 0.2; // 20% - lowered for better retrieval
+        const relevantChunks = contextChunks.filter(chunk => chunk.similarity >= SIMILARITY_THRESHOLD);
         
         // Log the retrieved chunks for debugging
         console.log('🔍 RAG Debug - Retrieved Chunks:');
@@ -706,117 +705,127 @@ export const POST: RequestHandler = async ({ request, locals }) => {
           console.log(`    Relevant: ${chunk.similarity >= SIMILARITY_THRESHOLD ? '✅' : '❌'}`);
         });
         
-                 console.log('📚 Citation Summary:');
-         console.log(`  Total chunks found: ${contextChunks.length}`);
-         console.log(`  Relevant chunks (≥${SIMILARITY_THRESHOLD * 100}%): ${relevantChunks.length}`);
-         console.log(`  Documents: ${[...new Set(contextChunks.map(c => c.documentTitle))].join(', ')}`);
-         console.log(`  Similarity range: ${(Math.min(...contextChunks.map(c => c.similarity)) * 100).toFixed(1)}% - ${(Math.max(...contextChunks.map(c => c.similarity)) * 100).toFixed(1)}%`);
-         console.log(`  🔍 Documents in search: ${[...new Set(contextChunks.map(c => c.documentTitle))].length} unique documents`);
-         console.log(`  📄 Document breakdown:`);
-         const docCounts = contextChunks.reduce((acc, chunk) => {
-           acc[chunk.documentTitle] = (acc[chunk.documentTitle] || 0) + 1;
-           return acc;
-         }, {} as Record<string, number>);
-         Object.entries(docCounts).forEach(([doc, count]) => {
-           console.log(`    - ${doc}: ${count} chunks`);
-         });
+        console.log('📚 Citation Summary:');
+        console.log(`  Total chunks found: ${contextChunks.length}`);
+        console.log(`  Relevant chunks (≥${SIMILARITY_THRESHOLD * 100}%): ${relevantChunks.length}`);
+        console.log(`  Documents: ${[...new Set(contextChunks.map(c => c.documentTitle))].join(', ')}`);
+        console.log(`  Similarity range: ${(Math.min(...contextChunks.map(c => c.similarity)) * 100).toFixed(1)}% - ${(Math.max(...contextChunks.map(c => c.similarity)) * 100).toFixed(1)}%`);
+        console.log(`  🔍 Documents in search: ${[...new Set(contextChunks.map(c => c.documentTitle))].length} unique documents`);
+        console.log(`  📄 Document breakdown:`);
+        const docCounts = contextChunks.reduce((acc, chunk) => {
+          acc[chunk.documentTitle] = (acc[chunk.documentTitle] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+        Object.entries(docCounts).forEach(([doc, count]) => {
+          console.log(`    - ${doc}: ${count} chunks`);
+        });
         
-                 // Use RAG-enhanced AI response only if we have relevant chunks
-         if (relevantChunks.length > 0) {
-           console.log('✅ Using RAG with relevant document context');
-           const result = await callGoogleGenerativeAIWithRAG(messages, relevantChunks);
-           aiResponse = result.answer;
-           citations = result.citations;
-         } else {
-           console.log('❌ No relevant documents found, using general knowledge');
+        // Use RAG-enhanced AI response only if we have relevant chunks
+        if (relevantChunks.length > 0) {
+          console.log('✅ Using RAG with relevant document context');
+          console.log(`🔍 Sending ${relevantChunks.length} chunks to AI with context`);
+          const result = await callGoogleGenerativeAIWithRAG(messages, relevantChunks);
+          aiResponse = result.answer;
+          citations = result.citations;
+          
+          // Validate that we got a proper RAG response
+          if (aiResponse.includes("I don't have enough information") && relevantChunks.length > 0) {
+            console.log('⚠️ AI gave fallback response despite having context - forcing RAG response');
+            // Force a better response by being more explicit
+            const forcedResult = await callGoogleGenerativeAIWithRAG(messages, relevantChunks);
+            aiResponse = forcedResult.answer;
+            citations = forcedResult.citations;
+          }
+        } else {
+          console.log('❌ No relevant documents found, using general knowledge');
            const result = await callGoogleGenerativeAIWithRAG(messages, []);
            aiResponse = result.answer;
            citations = result.citations;
-         }
-       } else if (env.GOOGLE_GENERATIVE_AI_API_KEY) {
-         console.log('Using Google Generative AI API without RAG');
-         // Use Google Generative AI API without RAG
+        }
+      } else if (env.GOOGLE_GENERATIVE_AI_API_KEY) {
+        console.log('Using Google Generative AI API without RAG');
+        // Use Google Generative AI API without RAG
          const result = await callGoogleGenerativeAIWithRAG(messages, []);
          aiResponse = result.answer;
          citations = result.citations;
-       } else {
-         console.log('No Google Generative AI API key found, using basic responses');
-         // Fall back to basic responses
-         aiResponse = generateBasicResponse(messages);
+      } else {
+        console.log('No Google Generative AI API key found, using basic responses');
+        // Fall back to basic responses
+        aiResponse = generateBasicResponse(messages);
          citations = [];
-       }
+      }
     } catch (error) {
       console.error('AI API error:', error);
       // Fall back to basic response on error
       aiResponse = generateBasicResponse(messages);
     }
 
-         // Create a streaming response
-     const stream = new ReadableStream({
-       start(controller) {
-         // Simulate streaming by sending the response in chunks
-         const words = aiResponse.split(' ');
-         let index = 0;
-         let isAborted = false;
-         
-         const sendChunk = () => {
-           // Check if the stream has been aborted
-           if (isAborted || index >= words.length) {
-             try {
+    // Create a streaming response
+    const stream = new ReadableStream({
+      start(controller) {
+        // Simulate streaming by sending the response in chunks
+        const words = aiResponse.split(' ');
+        let index = 0;
+        let isAborted = false;
+        
+        const sendChunk = () => {
+          // Check if the stream has been aborted
+          if (isAborted || index >= words.length) {
+            try {
                // Send final data with citations
                const finalData = {
                  type: 'complete',
                  citations: citations
                };
                controller.enqueue(new TextEncoder().encode(`1:${JSON.stringify(finalData)}\n`));
-               controller.close();
-             } catch (e) {
-               // Ignore errors when closing an already closed controller
-             }
-             return;
-           }
-           
-           try {
-             const chunk = words[index] + ' ';
-             controller.enqueue(new TextEncoder().encode(`0:${JSON.stringify(chunk)}\n`));
-             index++;
-             
-             // Check if we should continue or if request was aborted
-             if (index < words.length) {
-               setTimeout(sendChunk, 100); // Simulate typing delay
-             } else {
-               try {
+              controller.close();
+            } catch (e) {
+              // Ignore errors when closing an already closed controller
+            }
+            return;
+          }
+          
+          try {
+            const chunk = words[index] + ' ';
+            controller.enqueue(new TextEncoder().encode(`0:${JSON.stringify(chunk)}\n`));
+            index++;
+            
+            // Check if we should continue or if request was aborted
+            if (index < words.length) {
+              setTimeout(sendChunk, 100); // Simulate typing delay
+            } else {
+              try {
                  // Send final data with citations
                  const finalData = {
                    type: 'complete',
                    citations: citations
                  };
                  controller.enqueue(new TextEncoder().encode(`1:${JSON.stringify(finalData)}\n`));
-                 controller.close();
-               } catch (e) {
-                 // Ignore errors when closing an already closed controller
-               }
-             }
-           } catch (error) {
-             // If enqueue fails (stream closed), stop sending chunks
-             console.log('Stream closed, stopping chunks');
-             isAborted = true;
-             try {
-               controller.close();
-             } catch (e) {
-               // Ignore errors when closing an already closed controller
-             }
-           }
-         };
-         
-         sendChunk();
-         
-         // Handle stream cancellation
-         return () => {
-           isAborted = true;
-         };
-       }
-     });
+                controller.close();
+              } catch (e) {
+                // Ignore errors when closing an already closed controller
+              }
+            }
+          } catch (error) {
+            // If enqueue fails (stream closed), stop sending chunks
+            console.log('Stream closed, stopping chunks');
+            isAborted = true;
+            try {
+              controller.close();
+            } catch (e) {
+              // Ignore errors when closing an already closed controller
+            }
+          }
+        };
+        
+        sendChunk();
+        
+        // Handle stream cancellation
+        return () => {
+          isAborted = true;
+        };
+      }
+    });
 
     return new Response(stream, {
       headers: {

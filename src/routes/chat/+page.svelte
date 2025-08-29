@@ -13,7 +13,6 @@
     role: 'user' | 'assistant'; 
     content: string; 
     timestamp: Date; 
-    parentId?: string | null;
     citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>;
   };
   type Chat = { id: string; title: string; messages: Message[]; createdAt: Date };
@@ -25,7 +24,6 @@
   let error: string | null = null;
   let abortController: AbortController | null = null;
 
-  let replyToMessageId: string | null = null;
   let renamingChatId: string | null = null;
   let renameInput = '';
   let fileInput: HTMLInputElement;
@@ -33,7 +31,6 @@
   let isUploading = false;
   let uploadProgress = '';
   let attachedFiles: Array<{file: File, documentId?: string, chunksCount?: number}> = [];
-  $: replyToMessage = activeChat?.messages.find((m) => m.id === replyToMessageId) || null;
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -98,6 +95,10 @@
       // CRITICAL: Remove any ">" prefixes that might be showing
       text = text.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
       text = text.replace(/>\[(\d+)\]/g, '[$1]');
+      
+      // Ensure consistent line breaks for better formatting
+      text = text.replace(/\n\n+/g, '\n\n'); // Normalize multiple line breaks
+      text = text.replace(/\n\s*\n/g, '\n\n'); // Clean up line breaks with spaces
       
       // CRITICAL: Remove any raw data attributes that might still be showing
       text = text.replace(/data-citation-id="[^"]*"/g, '');
@@ -186,6 +187,11 @@
       text = text.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
       text = text.replace(/>\[(\d+)\]/g, '[$1]');
       
+      // FINAL FORMATTING: Ensure consistent spacing and formatting
+      text = text.replace(/\n{3,}/g, '\n\n'); // Max 2 consecutive line breaks
+      text = text.replace(/\s+$/gm, ''); // Remove trailing spaces on lines
+      text = text.replace(/^\s+/gm, ''); // Remove leading spaces on lines (except in code blocks)
+      
       console.log('🔍 Final processed text:', text.substring(0, 200) + '...');
     }
     
@@ -247,9 +253,8 @@
         messages: chat.messages ? chat.messages.map((msg: any) => ({
           id: msg.id,
           role: msg.role,
-          content: msg.content,
-          timestamp: new Date(msg.createdAt),
-          parentId: msg.parentId
+          content: msg.content ? msg.content.trim() : '',
+          timestamp: new Date(msg.createdAt)
         })) : []
       }));
       
@@ -299,9 +304,8 @@
               chat.messages = data.messages.map((msg: any) => ({
                 id: msg.id,
                 role: msg.role,
-                content: msg.content,
-                timestamp: new Date(msg.createdAt),
-                parentId: msg.parentId
+                content: msg.content ? msg.content.trim() : '',
+                timestamp: new Date(msg.createdAt)
               }));
             } else {
               chat.messages = [];
@@ -369,8 +373,7 @@
                     id: msg.id,
                     role: msg.role,
                     content: msg.content,
-                    timestamp: new Date(msg.createdAt),
-                    parentId: msg.parentId
+                    timestamp: new Date(msg.createdAt)
                   })) : []
                 }));
                 
@@ -396,39 +399,7 @@
   }
 
 
-  function getParentMessageContent(msg: Message): string | null {
-    if (!msg.parentId || !activeChat) return null;
-    const parent = activeChat.messages.find((m) => m.id === msg.parentId);
-    return parent ? parent.content : null;
-  }
 
-  function getParentPreview(msg: Message, maxLen = 160): string | null {
-    const c = getParentMessageContent(msg);
-    if (!c) return null;
-    // Strip markdown formatting for cleaner previews
-    const cleanText = c
-      .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
-      .replace(/__(.*?)__/g, '$1') // Remove bold
-      .replace(/\*(.*?)\*/g, '$1') // Remove italic
-      .replace(/_(.*?)_/g, '$1') // Remove italic
-      .replace(/`([^`]+)`/g, '$1') // Remove inline code
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links, keep text
-      .replace(/^#+\s+/gm, '') // Remove headers
-      .replace(/^[-*+]\s+/gm, '') // Remove list markers
-      .replace(/^\d+\.\s+/gm, '') // Remove ordered list markers
-      .replace(/^>\s+/gm, '') // Remove blockquote markers
-      .replace(/\n/g, ' ') // Replace newlines with spaces
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .trim();
-    
-    return cleanText.length > maxLen ? cleanText.slice(0, maxLen) + '…' : cleanText;
-  }
-
-  function isForkedMessage(chat: Chat | null, index: number, msg: Message): boolean {
-    if (!chat || !msg.parentId) return false;
-    const prev = chat.messages[index - 1];
-    return !prev || msg.parentId !== prev.id;
-  }
 
   async function sendMessage() {
     const text = input.trim();
@@ -563,8 +534,7 @@ Please answer my question based on the content of the attached documents.`;
       activeChat.title = text.length > 50 ? text.substring(0, 50) + '...' : text;
     }
 
-    // compute parent for tree fork
-    const parentId = replyToMessageId ?? (activeChat.messages.length > 0 ? activeChat.messages[activeChat.messages.length - 1].id : null);
+
 
     loading = true;
     scrollToBottom();
@@ -573,41 +543,14 @@ Please answer my question based on the content of the attached documents.`;
     abortController = new AbortController();
 
     try {
-      // Build branch context for forked messages
+      // Build messages for conversation
       const branchMessages = (() => {
-        if (replyToMessageId) {
-          // If we're replying to a specific message, build context from that message
-          const byId = new Map(activeChat.messages.map((m) => [m.id, m] as const));
-          const chain: Message[] = [];
-          const visited = new Set<string>();
-          
-          // Start from the message we're replying to
-          let cur: Message | undefined = byId.get(replyToMessageId);
-          while (cur && !visited.has(cur.id)) {
-            chain.push(cur);
-            visited.add(cur.id);
-            if (cur.parentId) {
-              cur = byId.get(cur.parentId);
-            } else {
-              break;
-            }
-          }
-          
-          // Reverse to get chronological order and add the new user message with internal prompt
-          chain.reverse();
-          const userMsgWithInternalPrompt = { ...userMsg, content: internalPrompt };
-          chain.push(userMsgWithInternalPrompt);
-          
-          console.log('Fork context:', { replyToMessageId, chain: chain.map(m => ({ role: m.role, content: m.content.substring(0, 50) })) });
-          return chain.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
-        } else {
-          // Normal linear conversation - send all messages plus the new user message with internal prompt
-          const allMessages = [...activeChat.messages];
-          const userMsgWithInternalPrompt = { ...userMsg, content: internalPrompt };
-          allMessages.push(userMsgWithInternalPrompt);
-          console.log('Normal conversation - all messages:', allMessages.map(m => ({ role: m.role, content: m.content.substring(0, 50) })));
-          return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
-        }
+        // Normal linear conversation - send all messages plus the new user message with internal prompt
+        const allMessages = [...activeChat.messages];
+        const userMsgWithInternalPrompt = { ...userMsg, content: internalPrompt };
+        allMessages.push(userMsgWithInternalPrompt);
+        console.log('Normal conversation - all messages:', allMessages.map(m => ({ role: m.role, content: m.content.substring(0, 50) })));
+        return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
       })();
 
       console.log('Branch messages before validation:', branchMessages);
@@ -639,12 +582,8 @@ Please answer my question based on the content of the attached documents.`;
       console.log('Sending messages:', validBranchMessages.length, 'valid messages');
 
       // Add the user message to the chat now that we have the context
-      const userMessageWithParent = { ...userMsg, parentId };
-      activeChat.messages = [...activeChat.messages, userMessageWithParent];
+      activeChat.messages = [...activeChat.messages, userMsg];
       chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
-      
-      // Clear reply banner after adding message
-      replyToMessageId = null;
 
              const res = await fetch('/api/chat/rag', {
          method: 'POST',
@@ -669,8 +608,7 @@ Please answer my question based on the content of the attached documents.`;
         id: assistantId, 
         role: 'assistant', 
         content: '',
-        timestamp: new Date(),
-        parentId: userMsg.id
+        timestamp: new Date()
       };
       
       activeChat.messages = [...activeChat.messages, assistantMsg];
@@ -744,7 +682,6 @@ Please answer my question based on the content of the attached documents.`;
           body: JSON.stringify({
             id: userMsg.id,
             chatId: activeChat.id,
-            parentId: parentId, // Use the computed parentId
             role: userMsg.role,
             content: userMsg.content
           })
@@ -756,7 +693,6 @@ Please answer my question based on the content of the attached documents.`;
           body: JSON.stringify({
             id: assistantId,
             chatId: activeChat.id,
-            parentId: userMsg.id,
             role: 'assistant',
             content: assistantText
           })
@@ -967,9 +903,7 @@ Please answer my question based on the content of the attached documents.`;
     attachedFiles = attachedFiles.filter((_, i) => i !== index);
   }
 
-  function setReplyTarget(id: string) {
-    replyToMessageId = id === replyToMessageId ? null : id;
-  }
+
 
   function formatTime(date: Date) {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1111,32 +1045,13 @@ Please answer my question based on the content of the attached documents.`;
         {:else}
           {#each activeChat.messages as message, i (`${activeChat.id}-${message.id}`)}
             <div class={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div class="max-w-3xl">
-                <div class="flex items-start gap-2">
-                  <button
-                    class="mt-1 text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                    title="Fork from this message"
-                    aria-label="Fork from this message"
-                    onclick={() => setReplyTarget(message.id)}
-                  >
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M6 3v6a3 3 0 0 0 3 3h6"/>
-                      <circle cx="6" cy="3" r="2"/>
-                      <circle cx="18" cy="12" r="2"/>
-                      <circle cx="6" cy="21" r="2"/>
-                      <path d="M9 15a3 3 0 0 0-3 3v3"/>
-                    </svg>
-                  </button>
-                  <div class={`rounded-2xl px-4 py-3 ${
-                    message.role === 'user' 
-                      ? 'bg-indigo-600 text-white' 
-                      : 'bg-gray-50 text-gray-900 border border-gray-200'
-                  }`}>
-                    {#if isForkedMessage(activeChat, i, message)}
-                      <div class="mb-2 text-xs text-gray-500 italic">
-                        Forked from: {getParentPreview(message) || 'previous message'}
-                      </div>
-                    {/if}
+                          <div class="max-w-3xl">
+              <div class="flex items-start gap-2">
+                <div class={`rounded-2xl px-4 py-3 ${
+                  message.role === 'user' 
+                    ? 'bg-indigo-600 text-white' 
+                    : 'bg-gray-50 text-gray-900 border border-gray-200'
+                }`}>
                     {#if message.role === 'assistant'}
                       <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content, message.citations) }}></div>
                     {:else}
@@ -1174,25 +1089,6 @@ Please answer my question based on the content of the attached documents.`;
 
     <!-- Input Area -->
     <div class="border-t border-gray-200 p-4">
-      {#if replyToMessage}
-        <div class="mb-3 p-3 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 flex items-start justify-between gap-3">
-          <div class="flex items-start gap-2">
-            <svg class="w-4 h-4 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M6 3v6a3 3 0 0 0 3 3h6"/>
-              <circle cx="6" cy="3" r="2"/>
-              <circle cx="18" cy="12" r="2"/>
-              <circle cx="6" cy="21" r="2"/>
-              <path d="M9 15a3 3 0 0 0-3 3v3"/>
-            </svg>
-            <div class="text-sm max-w-[80ch] truncate">
-              Replying to: <span use:setHtml={{ html: renderMarkdownLite(replyToMessage.content) }}></span>
-            </div>
-          </div>
-          <button class="text-indigo-700 hover:text-indigo-900 cursor-pointer" aria-label="Cancel reply" title="Cancel reply" onclick={() => (replyToMessageId = null)}>
-            ✕
-          </button>
-        </div>
-      {/if}
       
       <!-- Attached Files -->
       {#if attachedFiles.length > 0 && !loading}
@@ -1362,20 +1258,7 @@ Please answer my question based on the content of the attached documents.`;
     margin: 1rem 0 !important;
   }
 
-  .prose div[class*="bg-gray-900"] code,
-  .prose div[class*="bg-gray-800"] code {
-    background-color: transparent !important;
-    color: rgb(229 231 235) !important;
-    border: none !important;
-    padding: 0 !important;
-  }
 
-  /* Force all inline code to have dark backgrounds */
-  .prose code {
-    background-color: rgb(31 41 55) !important;
-    color: rgb(229 231 235) !important;
-    border: 1px solid rgb(75 85 99) !important;
-  }
 
   /* Additional direct targeting for code blocks */
   .prose [class*="language-"] {
